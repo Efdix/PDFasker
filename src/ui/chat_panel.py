@@ -11,29 +11,28 @@ from PySide6.QtGui import QFont, QKeyEvent
 
 
 class ChatBubble(QFrame):
-    """单条聊天气泡"""
+    """单条聊天气泡 —— 优化可读性"""
 
     def __init__(self, role: str, content: str, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(4)
 
         # 角色标签
-        role_label = QLabel("🤖 AI" if role == "assistant" else "👤 你")
-        role_font = QFont()
+        role_label = QLabel("🤖 AI 回答" if role == "assistant" else "👤 你的问题")
+        role_font = QFont("Microsoft YaHei UI", 11)
         role_font.setBold(True)
-        role_font.setPointSize(10)
         role_label.setFont(role_font)
-
-        if role == "assistant":
-            role_label.setStyleSheet("color: #89b4fa;")
-        else:
-            role_label.setStyleSheet("color: #a6e3a1;")
+        role_label.setStyleSheet(
+            "color: #7aa2f7; padding: 2px 0;" if role == "assistant"
+            else "color: #9ece6a; padding: 2px 0;"
+        )
         layout.addWidget(role_label)
 
-        # 内容
+        # 内容 —— 大字号，高对比度
         content_label = QLabel(content)
         content_label.setWordWrap(True)
         content_label.setTextFormat(Qt.TextFormat.MarkdownText)
@@ -41,20 +40,25 @@ class ChatBubble(QFrame):
             Qt.TextInteractionFlag.TextSelectableByMouse |
             Qt.TextInteractionFlag.LinksAccessibleByMouse
         )
+        content_font = QFont("Microsoft YaHei UI", 13)
+        content_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.2)
+        content_label.setFont(content_font)
+        content_label.setStyleSheet(
+            "color: #e2e5f2; line-height: 1.7; padding: 4px 0;"
+        )
         layout.addWidget(content_label)
 
         # 分隔线
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("background-color: #313244; max-height: 1px;")
+        sep.setStyleSheet("background-color: #2a2c3d; max-height: 1px; margin-top: 4px;")
         layout.addWidget(sep)
 
     def update_content(self, content: str):
         """更新气泡内容（用于流式输出）"""
-        # 找到内容标签并更新
         for i in range(self.layout().count()):
             w = self.layout().itemAt(i).widget()
-            if isinstance(w, QLabel) and w.styleSheet() == "":
+            if isinstance(w, QLabel) and "color: #e2e5f2" in (w.styleSheet() or ""):
                 w.setText(content)
                 break
 
@@ -112,13 +116,13 @@ class ChatPanel(QWidget):
         welcome = QLabel(
             "👋 欢迎使用 PDFasker！\n\n"
             "使用方法：\n"
-            "1. 点击左上角「打开 PDF」加载论文\n"
+            "1. 从左侧论文库选择或导入 PDF\n"
             "2. 在下方输入框输入你的问题\n"
             "3. AI 将基于论文内容为你解答\n\n"
             "📌 请先在设置中配置 API Key"
         )
         welcome.setWordWrap(True)
-        welcome.setStyleSheet("color: #a6adc8; padding: 20px;")
+        welcome.setStyleSheet("color: #9599b5; padding: 24px; font-size: 13px;")
         self.msg_layout.insertWidget(0, welcome)
 
         self.scroll_area.setWidget(self.msg_container)
@@ -126,14 +130,14 @@ class ChatPanel(QWidget):
 
         # 输入区
         input_frame = QFrame()
-        input_frame.setStyleSheet("background-color: #181825;")
+        input_frame.setStyleSheet("background-color: #161720; border-top: 1px solid #2a2c3d;")
         input_layout = QVBoxLayout(input_frame)
-        input_layout.setContentsMargins(12, 8, 12, 12)
+        input_layout.setContentsMargins(12, 10, 12, 12)
 
         self.input_box = QTextEdit()
         self.input_box.setPlaceholderText("输入你的问题，按 Ctrl+Enter 发送...")
         self.input_box.setMaximumHeight(120)
-        self.input_box.setMinimumHeight(60)
+        self.input_box.setMinimumHeight(64)
         input_layout.addWidget(self.input_box)
 
         btn_layout = QHBoxLayout()

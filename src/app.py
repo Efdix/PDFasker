@@ -91,7 +91,8 @@ class MainWindow(QMainWindow):
 
         # 主布局：三栏 —— 论文库 | PDF 阅读器 | 聊天面板
         outer_splitter = QSplitter(Qt.Orientation.Horizontal)
-        outer_splitter.setHandleWidth(2)
+        outer_splitter.setHandleWidth(3)
+        outer_splitter.setOpaqueResize(False)  # 拖拽时只显示指示线，松手才渲染，减少卡顿
 
         # 左：PDF 论文库
         self.pdf_list = PDFListPanel()
@@ -99,23 +100,30 @@ class MainWindow(QMainWindow):
 
         # 中：PDF 阅读器 + 右：聊天面板
         inner_splitter = QSplitter(Qt.Orientation.Horizontal)
-        inner_splitter.setHandleWidth(2)
+        inner_splitter.setHandleWidth(3)
+        inner_splitter.setOpaqueResize(False)
 
         self.pdf_viewer = PDFViewerPanel()
+        self.pdf_viewer.setMinimumWidth(300)
         self.pdf_viewer.pdf_loaded.connect(self._on_pdf_loaded)
         self.pdf_viewer.pdf_path_changed.connect(self._on_pdf_path_changed)
 
         self.chat_panel = ChatPanel()
+        self.chat_panel.setMinimumWidth(250)
         self.chat_panel.send_message.connect(self._on_user_message)
         self.chat_panel.clear_requested.connect(self._on_clear_chat)
 
         inner_splitter.addWidget(self.pdf_viewer)
         inner_splitter.addWidget(self.chat_panel)
-        inner_splitter.setSizes([600, 480])
+        inner_splitter.setSizes([550, 450])
+        inner_splitter.setStretchFactor(0, 2)  # 阅读器优先拉伸
+        inner_splitter.setStretchFactor(1, 1)
 
         outer_splitter.addWidget(self.pdf_list)
         outer_splitter.addWidget(inner_splitter)
-        outer_splitter.setSizes([220, 1060])  # 论文库占 220px
+        outer_splitter.setSizes([200, 1000])
+        outer_splitter.setStretchFactor(0, 0)  # 论文库不随窗口拉伸
+        outer_splitter.setStretchFactor(1, 1)
 
         self.setCentralWidget(outer_splitter)
 
