@@ -16,6 +16,8 @@ class ChatBubble(QFrame):
     def __init__(self, role: str, content: str, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
+        self.role = role
+        self._content_label: QLabel | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 6, 10, 6)
@@ -47,6 +49,7 @@ class ChatBubble(QFrame):
             "color: #e2e5f2; line-height: 1.7; padding: 4px 0;"
         )
         layout.addWidget(content_label)
+        self._content_label = content_label  # 保存引用，方便流式更新
 
         # 分隔线
         sep = QFrame()
@@ -56,11 +59,17 @@ class ChatBubble(QFrame):
 
     def update_content(self, content: str):
         """更新气泡内容（用于流式输出）"""
-        for i in range(self.layout().count()):
-            w = self.layout().itemAt(i).widget()
-            if isinstance(w, QLabel) and "color: #e2e5f2" in (w.styleSheet() or ""):
-                w.setText(content)
-                break
+        if self._content_label:
+            self._content_label.setText(content)
+
+    def get_content(self) -> str:
+        """获取当前文本内容"""
+        return self._content_label.text() if self._content_label else ""
+
+    def append_content(self, chunk: str):
+        """追加文本（流式输出）"""
+        if self._content_label:
+            self._content_label.setText(self._content_label.text() + chunk)
 
 
 class ChatPanel(QWidget):
@@ -192,13 +201,7 @@ class ChatPanel(QWidget):
     def append_ai_text(self, chunk: str):
         """追加 AI 回复文本（流式）"""
         if self._current_ai_bubble:
-            # 累积文本并更新
-            for i in range(self._current_ai_bubble.layout().count()):
-                w = self._current_ai_bubble.layout().itemAt(i).widget()
-                if isinstance(w, QLabel) and w.styleSheet() == "":
-                    current = w.text()
-                    w.setText(current + chunk)
-                    break
+            self._current_ai_bubble.append_content(chunk)
         self._scroll_to_bottom()
 
     def finish_ai_response(self):

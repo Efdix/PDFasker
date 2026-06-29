@@ -65,11 +65,6 @@ class PDFListPanel(QWidget):
         self.import_btn.clicked.connect(self._import_pdf)
         action_bar.addWidget(self.import_btn)
 
-        self.folder_btn = QPushButton("+ 文件夹")
-        self.folder_btn.setToolTip("新建分类文件夹")
-        self.folder_btn.clicked.connect(self._new_folder)
-        action_bar.addWidget(self.folder_btn)
-
         self.lib_path_btn = QPushButton("...")
         self.lib_path_btn.setToolTip("设置图书馆存储路径")
         self.lib_path_btn.setFixedWidth(32)
@@ -209,14 +204,22 @@ class PDFListPanel(QWidget):
 
     def _on_context_menu(self, pos):
         item = self.tree.itemAt(pos)
-        if not item:
-            return
-        data = item.data(0, Qt.ItemDataRole.UserRole)
         menu = QMenu(self)
         menu.setStyleSheet(
             "QMenu { background: #24253a; color: #cfd2e3; border: 1px solid #3b3d54; }"
             "QMenu::item:selected { background: #3b3d54; }"
         )
+
+        if not item:
+            # 空白处右键：新建文件夹 / 导入
+            a = menu.addAction("  + 新建文件夹")
+            a.triggered.connect(self._new_folder)
+            a = menu.addAction("  + 导入 PDF")
+            a.triggered.connect(self._import_pdf)
+            menu.exec(self.tree.viewport().mapToGlobal(pos))
+            return
+
+        data = item.data(0, Qt.ItemDataRole.UserRole)
 
         if data and data.get("type") == "pdf":
             path = data.get("path", "")
@@ -234,6 +237,9 @@ class PDFListPanel(QWidget):
             a.triggered.connect(lambda: self._remove_pdf(path))
         elif data and data.get("type") == "folder":
             name = data.get("name", "")
+            a = menu.addAction("  + 新建子文件夹")
+            a.triggered.connect(self._new_folder)
+            menu.addSeparator()
             a = menu.addAction("  重命名")
             a.triggered.connect(lambda: self._rename_folder(name))
             a = menu.addAction("  删除（文件保留）")

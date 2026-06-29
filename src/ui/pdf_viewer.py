@@ -82,27 +82,35 @@ class ParagraphCard(QFrame):
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(0)
         self.setStyleSheet(
-            "ParagraphCard { background-color: #1a1b26; border: 1px solid #2a2c3d; border-radius: 10px; margin: 3px 0px; }"
+            "ParagraphCard { background-color: #1a1b26; border: 1px solid #2a2c3d; border-radius: 10px; margin: 4px 0px; }"
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 10, 18, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(8)
 
         if self._is_meta:
             f = QFont("Microsoft YaHei UI", 10)
             self.text_label = QLabel(self._text); self.text_label.setFont(f)
-            self.text_label.setStyleSheet("color: #636688; line-height: 1.4; padding: 1px 0;")
+            self.text_label.setStyleSheet("color: #636688; line-height: 1.5; padding: 2px 0;")
         elif self._is_heading:
-            f = QFont("Microsoft YaHei UI", 14); f.setBold(True)
+            f = QFont("Microsoft YaHei UI", 15); f.setBold(True)
             self.text_label = QLabel(self._text); self.text_label.setFont(f)
-            self.text_label.setStyleSheet("color: #7aa2f7; padding: 4px 0;")
+            self.text_label.setStyleSheet("color: #7aa2f7; padding: 6px 0; letter-spacing: 0.5px;")
         else:
-            f = QFont("Segoe UI" if self._is_english else "Microsoft YaHei UI", 12)
-            if self._is_english: f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.3)
+            base_size = 13
+            f = QFont("Segoe UI" if self._is_english else "Microsoft YaHei UI", base_size)
+            if self._is_english:
+                f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.4)
+            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.3)
             self.text_label = QLabel(self._text); self.text_label.setFont(f)
-            self.text_label.setStyleSheet("color: #cfd2e3; line-height: 1.7; padding: 2px 0;")
+            self.text_label.setStyleSheet(
+                "color: #cfd2e3; line-height: 1.9; padding: 4px 0; "
+                "background-color: transparent;"
+            )
         self.text_label.setWordWrap(True)
+        self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.text_label)
 
@@ -277,6 +285,9 @@ class PDFViewerPanel(QWidget):
         toolbar.addStretch()
 
         self.batch_btn = QPushButton("🌐 全译")
+        self.batch_btn.clicked.connect(self._batch_translate)
+        self.batch_btn.setEnabled(False)
+        toolbar.addWidget(self.batch_btn)
         layout.addLayout(toolbar)
 
         # 信息栏

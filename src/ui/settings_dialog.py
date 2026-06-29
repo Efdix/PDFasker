@@ -111,12 +111,14 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
 
         self.tabs = QTabWidget()
+        self._chat_tab = APIConfigTab("chat", "💬 聊天 API — 基于论文内容的问答对话，建议用最强模型")
         self._trans_tab = APIConfigTab("trans", "🌐 翻译 API — 英文段落翻译，可用便宜模型")
         self._image_tab = APIConfigTab("image", "🖼️ 图析 API — 解读图表（需多模态模型，如 GPT-4o / Gemini）")
-        self._chat_tab = APIConfigTab("chat", "💬 聊天 API — 基于论文内容的问答对话，建议用最强模型")
+        self._review_tab = APIConfigTab("review", "📝 综述写作 API — 对照真实文献优化综述内容，分析深度高需强推理模型")
+        self.tabs.addTab(self._chat_tab, "💬 聊天")
         self.tabs.addTab(self._trans_tab, "🌐 翻译")
         self.tabs.addTab(self._image_tab, "🖼️ 图析")
-        self.tabs.addTab(self._chat_tab, "💬 聊天")
+        self.tabs.addTab(self._review_tab, "📝 综述核查")
         layout.addWidget(self.tabs)
 
         btn = QHBoxLayout()
@@ -135,12 +137,13 @@ class SettingsDialog(QDialog):
 
     def _current_tab(self) -> APIConfigTab:
         idx = self.tabs.currentIndex()
-        return [self._chat_tab, self._trans_tab, self._image_tab][idx]
+        return [self._chat_tab, self._trans_tab, self._image_tab, self._review_tab][idx]
 
     def _load(self):
         self._chat_tab.load(get_api_config(self._config, "chat_api"))
         self._trans_tab.load(get_api_config(self._config, "translation_api"))
         self._image_tab.load(get_api_config(self._config, "image_api"))
+        self._review_tab.load(get_api_config(self._config, "review_api"))
 
     def _test(self):
         tab = self._current_tab()
@@ -160,7 +163,8 @@ class SettingsDialog(QDialog):
         ck_api = self._chat_tab.get()
         tr_api = self._trans_tab.get()
         im_api = self._image_tab.get()
-        for api, name in [(ck_api, "聊天"), (tr_api, "翻译"), (im_api, "图析")]:
+        rv_api = self._review_tab.get()
+        for api, name in [(ck_api, "聊天"), (tr_api, "翻译"), (im_api, "图析"), (rv_api, "综述核查")]:
             if not api["api_key"]:
                 QMessageBox.warning(self, "提示", f"请填写{name} API 的 Key")
                 return
@@ -168,5 +172,6 @@ class SettingsDialog(QDialog):
         self._config["chat_api"] = ck_api
         self._config["translation_api"] = tr_api
         self._config["image_api"] = im_api
+        self._config["review_api"] = rv_api
         save_config(self._config)
         self.accept()

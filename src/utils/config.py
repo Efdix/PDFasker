@@ -48,8 +48,10 @@ DEFAULT_CONFIG = {
     "chat_api":        _default_api("DeepSeek", "deepseek-v4-flash"),
     "translation_api": _default_api("DeepSeek", "deepseek-v4-flash"),
     "image_api":       _default_api("DeepSeek", "deepseek-v4-flash"),
+    "review_api":      _default_api("DeepSeek", "deepseek-v4-flash"),
     "max_tokens": 1_000_000,
     "library_path": str(_DEFAULT_LIBRARY),
+    "zotero_data_dir": "",   # Zotero 数据目录（用户手动设置）
 }
 
 

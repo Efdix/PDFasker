@@ -4,10 +4,23 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.spec
 
 # 虚拟环境
 venv/
 env/
+.conda/
+
+# IDE
+.vscode/
+.idea/
+
+# 项目运行时数据
+.pdfasker/
+
+# 系统文件
+.DS_Store
+Thumbs.db
 .venv/
 
 # IDE
