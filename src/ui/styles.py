@@ -131,9 +131,21 @@ QComboBox {
     border-radius: 6px;
     padding: 6px 10px;
     font-size: 14px;
+    combobox-popup: 1;
 }
 QComboBox:hover {
     border-color: #7aa2f7;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 24px;
+}
+QComboBox::down-arrow {
+    image: none;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid #9599b5;
+    margin-right: 6px;
 }
 QComboBox QAbstractItemView {
     background-color: #24253a;
@@ -141,6 +153,7 @@ QComboBox QAbstractItemView {
     selection-background-color: #3b3d54;
     border: 1px solid #3b3d54;
     outline: none;
+    padding: 4px;
 }
 
 /* ========== 对话框 ========== */

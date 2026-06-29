@@ -277,15 +277,6 @@ class PDFViewerPanel(QWidget):
         toolbar.addStretch()
 
         self.batch_btn = QPushButton("🌐 全译")
-        self.batch_btn.setToolTip("翻译所有英文段落")
-        self.batch_btn.clicked.connect(self._batch_translate)
-        self.batch_btn.setEnabled(False)
-        toolbar.addWidget(self.batch_btn)
-
-        self.open_btn = QPushButton("打开 PDF")
-        self.open_btn.setObjectName("primaryBtn")
-        self.open_btn.clicked.connect(self._open_pdf)
-        toolbar.addWidget(self.open_btn)
         layout.addLayout(toolbar)
 
         # 信息栏
@@ -312,19 +303,31 @@ class PDFViewerPanel(QWidget):
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setStyleSheet("QScrollArea { border: none; background: #1a1b26; }")
 
-        self.container = QWidget()
-        self.container.setStyleSheet("background: #1a1b26;")
+        class _ResizeContainer(QWidget):
+            """容器：宽度始终跟随 scroll area viewport，确保卡片自适应"""
+            def __init__(self, scroll_area):
+                super().__init__()
+                self._sa = scroll_area
+                self.setStyleSheet("background: #1a1b26;")
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                vp_w = self._sa.viewport().width()
+                if self.width() != vp_w:
+                    self.setMinimumWidth(vp_w)
+
+        self.container = _ResizeContainer(self.scroll_area)
         self.card_layout = QVBoxLayout(self.container)
         self.card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.card_layout.setSpacing(0)
         self.card_layout.setContentsMargins(0, 10, 0, 20)
 
         self.placeholder = QLabel(
-            "📄 点击「打开 PDF」或从左侧论文库选择论文\n\n"
+            "📄 从左侧论文库选择或拖拽 PDF 开始阅读\n\n"
             "• 段落式排版，清晰可读\n"
             "• 图片自动提取展示\n"
             "• 英文段落一键中英对照\n"
-            "• 章节标题自动识别高亮"
+            "• 章节标题自动识别高亮\n"
+            "• 作者/单位等元信息自动淡化"
         )
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder.setStyleSheet("color: #636688; padding: 80px 40px; font-size: 15px;")

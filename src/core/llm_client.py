@@ -58,11 +58,6 @@ PROVIDERS = {
         "models": ["mimo-v2.5", "mimo-v2.5-pro"],
         "description": "Mimo 大模型系列",
     },
-    "MiniMax": {
-        "base_url": "https://api.minimax.chat/v1",
-        "models": ["MiniMax-Text-01", "abab6.5s-chat"],
-        "description": "MiniMax 大模型",
-    },
     "自定义": {
         "base_url": "",
         "models": [],
