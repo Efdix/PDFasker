@@ -16,38 +16,34 @@ class LLMClient:
         self.model = model
         self._client = OpenAI(api_key=api_key, base_url=base_url)
 
-    def chat(self, messages: list[dict], stream: bool = True) -> Generator[str, None, None] | str:
+    def chat_stream(self, messages: list[dict]) -> Generator[str, None, None]:
         """
-        发送对话请求。
-
-        参数:
-            messages: 标准 OpenAI 格式的消息列表
-            stream: 是否流式输出
-
-        返回:
-            流式模式: 生成器，逐块 yield 文本（自动跳过思考过程）
-            非流式模式: 返回完整回复字符串
+        流式对话 —— 返回生成器，逐块 yield 文本。
+        自动跳过 DeepSeek V4 的 reasoning_content（思考过程）。
         """
         response = self._client.chat.completions.create(
             model=self.model,
             messages=messages,
-            stream=stream,
-            temperature=0.3,  # 解读文献用较低温度，更严谨
+            stream=True,
+            temperature=0.3,
         )
-
-        if stream:
-            for chunk in response:
-                delta = chunk.choices[0].delta
-                # DeepSeek V4 thinking 模式会返回 reasoning_content（思考过程）
-                # 我们只取真正的回复内容 content
-                if delta.content:
-                    yield delta.content
-        else:
-            return response.choices[0].message.content
+        for chunk in response:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                yield delta.content
 
     def chat_sync(self, messages: list[dict]) -> str:
-        """同步聊天（非流式），返回完整回复"""
-        return self.chat(messages, stream=False)
+        """
+        同步对话 —— 一次性返回完整回复字符串。
+        用于测试连接、翻译等不需要流式的场景。
+        """
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            stream=False,
+            temperature=0.3,
+        )
+        return response.choices[0].message.content
 
 
 # 预设的 API 提供商配置

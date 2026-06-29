@@ -10,12 +10,13 @@ from PySide6.QtCore import Qt, QThread, Signal as QtSignal
 from PySide6.QtGui import QAction
 
 from .ui.styles import STYLESHEET
+from .ui.pdf_list_panel import PDFListPanel
 from .ui.pdf_viewer import PDFViewerPanel
 from .ui.chat_panel import ChatPanel
 from .ui.settings_dialog import SettingsDialog
 from .core.llm_client import LLMClient
 from .core.context_manager import ContextManager
-from .utils.config import load_config
+from .utils.config import load_config, add_pdf_to_library
 
 
 class LLMWorker(QThread):
@@ -32,7 +33,7 @@ class LLMWorker(QThread):
 
     def run(self):
         try:
-            for chunk in self._client.chat(self._messages, stream=True):
+            for chunk in self._client.chat_stream(self._messages):
                 self.chunk_received.emit(chunk)
             self.finished.emit()
         except Exception as e:
@@ -88,9 +89,17 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)
 
-        # 主分割器：左侧 PDF 查看器 + 右侧聊天面板
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(2)
+        # 主布局：三栏 —— 论文库 | PDF 阅读器 | 聊天面板
+        outer_splitter = QSplitter(Qt.Orientation.Horizontal)
+        outer_splitter.setHandleWidth(2)
+
+        # 左：PDF 论文库
+        self.pdf_list = PDFListPanel()
+        self.pdf_list.pdf_selected.connect(self._on_library_pdf_selected)
+
+        # 中：PDF 阅读器 + 右：聊天面板
+        inner_splitter = QSplitter(Qt.Orientation.Horizontal)
+        inner_splitter.setHandleWidth(2)
 
         self.pdf_viewer = PDFViewerPanel()
         self.pdf_viewer.pdf_loaded.connect(self._on_pdf_loaded)
@@ -100,11 +109,15 @@ class MainWindow(QMainWindow):
         self.chat_panel.send_message.connect(self._on_user_message)
         self.chat_panel.clear_requested.connect(self._on_clear_chat)
 
-        splitter.addWidget(self.pdf_viewer)
-        splitter.addWidget(self.chat_panel)
-        splitter.setSizes([600, 680])  # 初始比例
+        inner_splitter.addWidget(self.pdf_viewer)
+        inner_splitter.addWidget(self.chat_panel)
+        inner_splitter.setSizes([600, 480])
 
-        self.setCentralWidget(splitter)
+        outer_splitter.addWidget(self.pdf_list)
+        outer_splitter.addWidget(inner_splitter)
+        outer_splitter.setSizes([220, 1060])  # 论文库占 220px
+
+        self.setCentralWidget(outer_splitter)
 
         # 状态栏
         self.status_bar = QStatusBar()
@@ -138,6 +151,11 @@ class MainWindow(QMainWindow):
         import os
         fname = os.path.basename(path) if path else ""
         self.setWindowTitle(f"PDFasker — {fname}" if fname else "PDFasker — AI 论文解读助手")
+
+    def _on_library_pdf_selected(self, path: str):
+        """从论文库中选择 PDF"""
+        if path and path != self.pdf_viewer.get_current_path():
+            self.pdf_viewer.load_pdf(path)
 
     def _on_user_message(self, text: str):
         """用户发送消息"""
@@ -241,6 +259,8 @@ class MainWindow(QMainWindow):
                     base_url=base_url,
                     model=model,
                 )
+                # 注入到 PDF 阅读器（用于段落翻译）
+                self.pdf_viewer.set_llm_client(self._llm_client)
                 self._status_model_label.setText(
                     f"模型: {model} | API: {self._config.get('provider', '')}"
                 )
