@@ -10,10 +10,10 @@ class ContextManager:
     # 取保守值：2 字符/token
     CHARS_PER_TOKEN = 2
 
-    def __init__(self, max_tokens: int = 120_000):
+    def __init__(self, max_tokens: int = 1_000_000):
         """
         参数:
-            max_tokens: 模型最大上下文窗口（保留一些余量给回复）
+            max_tokens: 模型最大上下文窗口（DeepSeek V4 支持 1M）
         """
         self.max_tokens = max_tokens
         self.max_chars = max_tokens * self.CHARS_PER_TOKEN

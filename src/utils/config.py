@@ -14,8 +14,8 @@ DEFAULT_CONFIG = {
     "provider": "DeepSeek",
     "api_key": "",
     "base_url": "https://api.deepseek.com",
-    "model": "deepseek-chat",
-    "max_tokens": 120_000,
+    "model": "deepseek-v4-flash",
+    "max_tokens": 1_000_000,
 }
 
 

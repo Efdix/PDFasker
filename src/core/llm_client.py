@@ -1,6 +1,6 @@
 """
 LLM API 客户端 —— 支持所有 OpenAI 兼容接口
-（DeepSeek、MiniMax、通义千问、智谱 等）
+（DeepSeek V4、MiniMax、通义千问、智谱 等）
 """
 
 from openai import OpenAI
@@ -25,7 +25,7 @@ class LLMClient:
             stream: 是否流式输出
 
         返回:
-            流式模式: 生成器，逐块 yield 文本
+            流式模式: 生成器，逐块 yield 文本（自动跳过思考过程）
             非流式模式: 返回完整回复字符串
         """
         response = self._client.chat.completions.create(
@@ -37,8 +37,11 @@ class LLMClient:
 
         if stream:
             for chunk in response:
-                if chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+                delta = chunk.choices[0].delta
+                # DeepSeek V4 thinking 模式会返回 reasoning_content（思考过程）
+                # 我们只取真正的回复内容 content
+                if delta.content:
+                    yield delta.content
         else:
             return response.choices[0].message.content
 
@@ -51,8 +54,13 @@ class LLMClient:
 PROVIDERS = {
     "DeepSeek": {
         "base_url": "https://api.deepseek.com",
-        "models": ["deepseek-chat", "deepseek-reasoner"],
-        "description": "DeepSeek 大模型（推荐用于科研文献解读）",
+        "models": [
+            "deepseek-v4-flash",    # ⭐ 推荐：快 + 便宜，1M 上下文
+            "deepseek-v4-pro",      # 最强：深度推理，1M 上下文
+            "deepseek-chat",        # 旧版（2026/7/24 停用）→ 同 v4-flash 非思考模式
+            "deepseek-reasoner",    # 旧版（2026/7/24 停用）→ 同 v4-flash 思考模式
+        ],
+        "description": "DeepSeek V4 系列（1M 上下文 | Flash 实惠 / Pro 最强 | 支持思考模式）",
     },
     "MiniMax": {
         "base_url": "https://api.minimax.chat/v1",

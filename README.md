@@ -96,10 +96,14 @@ pip install -r requirements.txt
 
 ### 第四步：获取 API Key
 
-#### DeepSeek（推荐）
+#### DeepSeek V4（推荐）
+
 1. 访问 [platform.deepseek.com](https://platform.deepseek.com/)
 2. 注册并获取 API Key
-3. 费用：约 ¥1/百万 tokens
+3. 推荐模型：
+   - `deepseek-v4-flash` — 快速实惠，1M 上下文，适合日常论文解读
+   - `deepseek-v4-pro` — 最强推理，1M 上下文，适合深度分析
+4. 费用：Flash 约 ¥1/百万 tokens，Pro 约 ¥3/百万 tokens
 
 #### MiniMax
 1. 访问 [platform.minimaxi.com](https://platform.minimaxi.com/)
@@ -184,7 +188,7 @@ PDFasker/
 
 ### Q: 支持哪些大模型？
 **A:** 所有 OpenAI 兼容接口的模型，包括但不限于：
-- **DeepSeek** (deepseek-chat, deepseek-reasoner)
+- **DeepSeek V4** (`deepseek-v4-flash`, `deepseek-v4-pro`) ← 推荐
 - **MiniMax** (MiniMax-Text-01, abab6.5s-chat)
 - **通义千问** (qwen-turbo, qwen-plus)
 - **智谱 GLM** (glm-4, glm-4-flash)
@@ -195,7 +199,7 @@ PDFasker/
 **A:** API Key 存储在 `%USERPROFILE%\.pdfasker\config.json`，不上传到任何服务器。建议不要在公共电脑上使用。
 
 ### Q: 支持多长的论文？
-**A:** 目前上下文窗口设为 120K tokens（适配 DeepSeek）。大多数 30 页以内的论文可完整处理。更长的论文会自动截断保留首尾。
+**A:** DeepSeek V4 支持 **1M tokens** 上下文窗口，可以一次性处理几百页的论文。即使整本博士论文也绰绰有余。
 
 ### Q: 如何切换到另一台电脑使用？
 **A:** 

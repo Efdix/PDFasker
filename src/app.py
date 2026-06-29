@@ -52,7 +52,7 @@ class MainWindow(QMainWindow):
         self._config = load_config()
         self._llm_client: LLMClient | None = None
         self._context_manager = ContextManager(
-            max_tokens=self._config.get("max_tokens", 120_000)
+            max_tokens=self._config.get("max_tokens", 1_000_000)
         )
         self._llm_worker: LLMWorker | None = None
 
