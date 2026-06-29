@@ -14,6 +14,12 @@ QWidget {
     color: #cfd2e3;
 }
 
+/* ========== 滚动区域 ========== */
+QScrollArea {
+    background-color: #1a1b26;
+    border: none;
+}
+
 /* ========== 分割器 ========== */
 QSplitter::handle {
     background-color: #2a2c3d;

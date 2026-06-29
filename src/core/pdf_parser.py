@@ -98,13 +98,14 @@ class PDFParser:
 
     def extract_structured_paragraphs(self) -> list[dict]:
         """
-        智能分段：基于文本块位置和字体信息合并为段落。
-        返回: [{"text": str, "is_heading": bool, "page": int, "has_image": bool, "image_path": str}, ...]
+        智能分段：基于文本块位置和字体信息。
+        后续对过长段落做句子级切分，方便阅读。
         """
+        import re
         blocks = self.extract_blocks()
         images = {img["page"]: img for img in self.extract_images()}
 
-        paragraphs = []
+        raw_paras = []  # [{text, is_heading, page, image_path}]
         current_lines = []
         current_page = 1
         last_y = -999
@@ -112,72 +113,79 @@ class PDFParser:
 
         for block in blocks:
             if block["type"] == "image_placeholder":
-                # 图片前的文字作为一个段落
                 if current_lines:
-                    text = " ".join(current_lines)
-                    paragraphs.append({
-                        "text": text,
-                        "is_heading": self._is_heading(text, last_font),
-                        "page": current_page,
-                        "image_path": "",
+                    raw_paras.append({
+                        "text": "\n".join(current_lines),
+                        "is_heading": self._is_heading(" ".join(current_lines), last_font),
+                        "page": current_page, "image_path": "",
                     })
                     current_lines = []
-                # 插入图片标记
                 img = images.get(block["page"])
-                paragraphs.append({
-                    "text": "",
-                    "is_heading": False,
+                raw_paras.append({
+                    "text": "", "is_heading": False,
                     "page": block["page"],
                     "image_path": img["path"] if img else "",
                 })
                 last_y = -999
                 continue
 
-            page = block["page"]
-            y = block["y"]
-            font_size = block["font_size"]
-            text = block["text"]
+            page, y, fs, text = block["page"], block["y"], block["font_size"], block["text"]
 
-            # 页面切换 → 新段落
             if page != current_page:
                 if current_lines:
-                    paragraphs.append({
-                        "text": " ".join(current_lines),
+                    raw_paras.append({
+                        "text": "\n".join(current_lines),
                         "is_heading": self._is_heading(" ".join(current_lines), last_font),
-                        "page": current_page,
-                        "image_path": "",
+                        "page": current_page, "image_path": "",
                     })
                     current_lines = []
-                current_page = page
-                last_y = -999
+                current_page = page; last_y = -999
 
-            # 垂直间距 > 1.5 倍行高 → 新段落
             gap = y - last_y if last_y > 0 else 0
-            if gap > font_size * 3 and current_lines:
-                text_combined = " ".join(current_lines)
-                paragraphs.append({
-                    "text": text_combined,
-                    "is_heading": self._is_heading(text_combined, last_font),
-                    "page": page,
-                    "image_path": "",
+            if gap > fs * 2.5 and current_lines:
+                raw_paras.append({
+                    "text": "\n".join(current_lines),
+                    "is_heading": self._is_heading(" ".join(current_lines), last_font),
+                    "page": page, "image_path": "",
                 })
                 current_lines = []
 
             current_lines.append(text)
             last_y = y
-            last_font = max(last_font, font_size)
+            last_font = max(last_font, fs)
 
-        # 最后一段
         if current_lines:
-            text_combined = " ".join(current_lines)
-            paragraphs.append({
-                "text": text_combined,
-                "is_heading": self._is_heading(text_combined, last_font),
-                "page": current_page,
-                "image_path": "",
+            raw_paras.append({
+                "text": "\n".join(current_lines),
+                "is_heading": self._is_heading(" ".join(current_lines), last_font),
+                "page": current_page, "image_path": "",
             })
 
-        return paragraphs
+        # 后处理：对过长的段落做句子级切分
+        result = []
+        for para in raw_paras:
+            if para["image_path"] or para["is_heading"] or len(para["text"]) < 300:
+                result.append(para)
+            else:
+                # 在句子边界处切分（英文用 . ! ? 后跟空格+大写，中文用。！？）
+                sentences = re.split(
+                    r'(?<=[.!?])\s+(?=[A-Z])|(?<=[。！？])\s*',
+                    para["text"]
+                )
+                buffer = ""
+                for s in sentences:
+                    s = s.strip()
+                    if not s: continue
+                    if len(buffer) + len(s) < 400:
+                        buffer = (buffer + " " + s).strip() if buffer else s
+                    else:
+                        if buffer:
+                            result.append({**para, "text": buffer})
+                        buffer = s
+                if buffer:
+                    result.append({**para, "text": buffer})
+
+        return result
 
     def _is_heading(self, text: str, font_size: float) -> bool:
         """判断文本是否是章节标题"""

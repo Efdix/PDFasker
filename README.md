@@ -99,11 +99,13 @@ pip install -r requirements.txt
 #### DeepSeek V4（推荐）
 
 1. 访问 [platform.deepseek.com](https://platform.deepseek.com/)
-2. 注册并获取 API Key
-3. 推荐模型：
-   - `deepseek-v4-flash` — 快速实惠，1M 上下文，适合日常论文解读
-   - `deepseek-v4-pro` — 最强推理，1M 上下文，适合深度分析
-4. 费用：Flash 约 ¥1/百万 tokens，Pro 约 ¥3/百万 tokens
+2. 模型：`deepseek-v4-flash`（快）/ `deepseek-v4-pro`（强）
+3. Base URL：`https://api.deepseek.com`
+
+#### Mimo
+
+1. Base URL：`https://api.xiaomimimo.com/v1`
+2. 模型：`mimo-v2.5` / `mimo-v2.5-pro`
 
 #### MiniMax
 1. 访问 [platform.minimaxi.com](https://platform.minimaxi.com/)
@@ -196,7 +198,10 @@ PDFasker/
 - 任何兼容 `/v1/chat/completions` 的 API
 
 ### Q: API Key 安全吗？
-**A:** API Key 存储在 `%USERPROFILE%\.pdfasker\config.json`，不上传到任何服务器。建议不要在公共电脑上使用。
+**A:** API Key 存储在 `%USERPROFILE%\.pdfasker\config.json`，不上传任何服务器。
+
+### Q: 聊天记录保存在哪？
+**A:** 在 `%USERPROFILE%\.pdfasker\chats\` 目录下，按文档 ID 隔离存储。**不是**保存在你设置的 PDF 图书馆目录里。每篇论文的对话独立保存，切换论文时自动加载历史。
 
 ### Q: 支持多长的论文？
 **A:** DeepSeek V4 支持 **1M tokens** 上下文窗口，可以一次性处理几百页的论文。即使整本博士论文也绰绰有余。

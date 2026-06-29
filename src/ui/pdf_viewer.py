@@ -1,43 +1,60 @@
 """
-PDF 阅读器 —— 结构化段落 + 图片展示 + 中英对照
+PDF 阅读器 —— 结构化段落 + 图片展示 + 中英对照 + 追问
 """
 
-import os
-import tempfile
+import os, base64, tempfile
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QPushButton,
-    QLabel, QFrame, QFileDialog, QProgressBar,
+    QLabel, QFrame, QFileDialog, QProgressBar, QTextEdit,
 )
 from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtGui import QFont, QPixmap
 
 
-# ========== 段落翻译后台线程 ==========
+# ========== 图片解析后台线程（独立类防崩溃）==========
+
+class ImageExplainWorker(QThread):
+    done = Signal(str)
+    err = Signal(str)
+
+    def __init__(self, client, image_path: str):
+        super().__init__()
+        self._c = client
+        self._p = image_path
+
+    def run(self):
+        try:
+            with open(self._p, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            r = self._c.chat_sync([{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "请详细解读这张学术论文中的图片/图表。说明它展示的内容、关键数据趋势、以及它在论文中的作用。请用中文回答。"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ]
+            }])
+            self.done.emit(r)
+        except Exception as e:
+            self.err.emit(str(e))
+
+
+# ========== 段落翻译线程 ==========
 
 class TranslationWorker(QThread):
     finished = Signal(int, str)
     error = Signal(int, str)
 
-    def __init__(self, client, paragraph_index: int, text: str):
+    def __init__(self, client, idx: int, text: str):
         super().__init__()
-        self._client = client
-        self._idx = paragraph_index
-        self._text = text
+        self._c = client; self._idx = idx; self._text = text
 
     def run(self):
         try:
-            result = self._client.chat_sync([
-                {
-                    "role": "system",
-                    "content": (
-                        "你是学术论文翻译助手。将英文段落译成中文。"
-                        "要求：1) 术语准确，首次出现时保留英文并括号注中文；"
-                        "2) 保持段落结构和逻辑；3) 自然流畅；4) 只输出译文。"
-                    ),
-                },
+            r = self._c.chat_sync([
+                {"role": "system", "content": "你是学术论文翻译助手。将以下段落译成中文。要求：术语准确，首次出现保留英文括号注中文；保持段落结构；自然流畅；只输出译文。"},
                 {"role": "user", "content": self._text},
             ])
-            self.finished.emit(self._idx, result)
+            self.finished.emit(self._idx, r)
         except Exception as e:
             self.error.emit(self._idx, str(e))
 
@@ -46,123 +63,114 @@ class TranslationWorker(QThread):
 
 class ParagraphCard(QFrame):
     translate_requested = Signal(int, str)
+    follow_up = Signal(str, str)  # context_text, user_question
 
     def __init__(self, para: dict, index: int, parent=None):
         super().__init__(parent)
         self._index = index
         self._text = para.get("text", "")
         self._is_heading = para.get("is_heading", False)
-        self._is_english = self._detect_english(self._text)
+        self._is_english = self._detect_en(self._text)
         self._translated = False
         self._setup_ui()
 
-    def _detect_english(self, text: str) -> bool:
-        if not text:
-            return False
-        alpha = sum(1 for c in text if c.isascii() and c.isalpha())
-        return (alpha / max(len(text), 1)) > 0.55
+    def _detect_en(self, text: str) -> bool:
+        if not text: return False
+        ascii_chars = sum(1 for c in text if c.isascii())
+        return (ascii_chars / max(len(text), 1)) > 0.4
 
     def _setup_ui(self):
         self.setStyleSheet(
-            "ParagraphCard {"
-            "  background-color: #1a1b26;"
-            "  border: 1px solid #2a2c3d;"
-            "  border-radius: 10px;"
-            "  margin: 6px 12px;"
-            "}"
+            "ParagraphCard { background-color: #1a1b26; border: 1px solid #2a2c3d; border-radius: 10px; margin: 6px 12px; }"
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
-        # 标题样式
         if self._is_heading:
-            heading_font = QFont("Microsoft YaHei UI", 14)
-            heading_font.setBold(True)
-            self.text_label = QLabel(self._text)
-            self.text_label.setFont(heading_font)
+            f = QFont("Microsoft YaHei UI", 14); f.setBold(True)
+            self.text_label = QLabel(self._text); self.text_label.setFont(f)
             self.text_label.setStyleSheet("color: #7aa2f7; padding: 4px 0;")
         else:
-            if self._is_english:
-                text_font = QFont("Segoe UI", 12)
-                text_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.3)
-            else:
-                text_font = QFont("Microsoft YaHei UI", 12)
-            self.text_label = QLabel(self._text)
-            self.text_label.setFont(text_font)
-            self.text_label.setStyleSheet(
-                "color: #cfd2e3; line-height: 1.8; padding: 2px 0;"
-            )
+            f = QFont("Segoe UI" if self._is_english else "Microsoft YaHei UI", 12)
+            if self._is_english: f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.3)
+            self.text_label = QLabel(self._text); self.text_label.setFont(f)
+            self.text_label.setStyleSheet("color: #cfd2e3; line-height: 1.7; padding: 2px 0;")
         self.text_label.setWordWrap(True)
         self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.text_label)
 
-        # 翻译区（仅非标题的英文段落）
-        if self._is_english and not self._is_heading and len(self._text) > 50:
-            sep = QFrame()
-            sep.setFrameShape(QFrame.Shape.HLine)
+        # 翻译按钮：非标题且有内容就显示
+        if not self._is_heading and len(self._text.strip()) > 30:
+            sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
             sep.setStyleSheet("background-color: #2a2c3d; max-height: 1px;")
-            self.trans_sep = sep
-            layout.addWidget(self.trans_sep)
+            self.trans_sep = sep; layout.addWidget(self.trans_sep)
 
-            zh_font = QFont("Microsoft YaHei UI", 12)
-            self.zh_label = QLabel()
-            self.zh_label.setFont(zh_font)
-            self.zh_label.setWordWrap(True)
-            self.zh_label.setStyleSheet("color: #9ece6a; line-height: 1.8; padding: 4px 0;")
+            self.zh_label = QLabel(); self.zh_label.setWordWrap(True)
+            self.zh_label.setFont(QFont("Microsoft YaHei UI", 12))
+            self.zh_label.setStyleSheet("color: #9ece6a; line-height: 1.7; padding: 4px 0;")
             self.zh_label.setVisible(False)
             self.zh_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             layout.addWidget(self.zh_label)
 
             btn_row = QHBoxLayout()
-            btn_row.addStretch()
-            self.trans_btn = QPushButton("🌐 翻译")
-            self.trans_btn.setFixedWidth(90)
-            self.trans_btn.clicked.connect(self._request)
+            self.trans_btn = QPushButton("🌐 翻译" if self._is_english else "🔄 翻译本段")
+            self.trans_btn.setFixedWidth(100); self.trans_btn.clicked.connect(self._request)
             btn_row.addWidget(self.trans_btn)
+            btn_row.addStretch()
             layout.addLayout(btn_row)
+
+            # 追问输入区（翻译后显示）
+            self.follow_frame = QFrame()
+            fl = QHBoxLayout(self.follow_frame); fl.setContentsMargins(0, 0, 0, 0); fl.setSpacing(6)
+            self.follow_input = QTextEdit(); self.follow_input.setPlaceholderText("对翻译内容追问...")
+            self.follow_input.setMaximumHeight(50); self.follow_input.setMinimumHeight(36)
+            fl.addWidget(self.follow_input, 1)
+            ask_btn = QPushButton("发送"); ask_btn.setObjectName("primaryBtn"); ask_btn.setFixedWidth(60)
+            ask_btn.clicked.connect(self._send_follow)
+            fl.addWidget(ask_btn)
+            self.follow_frame.setVisible(False)
+            layout.addWidget(self.follow_frame)
 
     def _request(self):
         if not self._translated:
-            self.trans_btn.setText("⏳")
-            self.trans_btn.setEnabled(False)
+            self.trans_btn.setText("⏳"); self.trans_btn.setEnabled(False)
             self.translate_requested.emit(self._index, self._text)
 
     def show_translation(self, zh: str):
-        self._translated = True
-        self.zh_label.setText(zh)
-        self.zh_label.setVisible(True)
-        self.trans_btn.setText("✅")
-        self.trans_btn.setStyleSheet("color: #9ece6a;")
+        self._translated = True; self._trans_text = zh
+        self.zh_label.setText(zh); self.zh_label.setVisible(True)
+        self.trans_btn.setText("✅"); self.trans_btn.setStyleSheet("color: #9ece6a;")
+        self.follow_frame.setVisible(True)
 
     def show_error(self, err: str):
-        self.trans_btn.setText("❌")
-        self.trans_btn.setEnabled(True)
-        self.trans_btn.setToolTip(err)
+        self.trans_btn.setText("❌"); self.trans_btn.setEnabled(True); self.trans_btn.setToolTip(err)
+
+    def _send_follow(self):
+        q = self.follow_input.toPlainText().strip()
+        if q:
+            ctx = f"原文：{self._text[:500]}\n\n译文：{getattr(self, '_trans_text', '')}\n\n追问：{q}"
+            self.follow_up.emit(ctx, q)
+            self.follow_input.clear()
 
 
-# ========== 图片卡片 ==========
+# ========== 图片卡片（带解释 + 追问）==========
 
 class ImageCard(QFrame):
-    """PDF 中的图片 —— 支持 AI 解释"""
+    """PDF 中的图片 —— AI 解释 + 追问"""
 
-    explain_requested = Signal(str)  # image_path
+    explain_requested = Signal(str)
+    follow_up = Signal(str, str)
 
     def __init__(self, image_path: str, page: int, parent=None):
         super().__init__(parent)
         self._image_path = image_path
         self._explained = False
         self.setStyleSheet(
-            "ImageCard {"
-            "  background-color: #1a1b26;"
-            "  border: 1px solid #2a2c3d;"
-            "  border-radius: 10px;"
-            "  margin: 6px 12px;"
-            "}"
+            "ImageCard { background-color: #1a1b26; border: 1px solid #2a2c3d; border-radius: 10px; margin: 6px 12px; }"
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(16, 12, 16, 12); layout.setSpacing(8)
 
         page_label = QLabel(f"📷 第 {page} 页插图")
         page_label.setStyleSheet("color: #9599b5; font-size: 11px;")
@@ -172,42 +180,55 @@ class ImageCard(QFrame):
         if image_path and os.path.exists(image_path):
             pixmap = QPixmap(image_path)
             if not pixmap.isNull():
-                if pixmap.width() > 550:
-                    pixmap = pixmap.scaledToWidth(550, Qt.TransformationMode.SmoothTransformation)
-                img_label = QLabel()
-                img_label.setPixmap(pixmap)
+                if pixmap.width() > 500:
+                    pixmap = pixmap.scaledToWidth(500, Qt.TransformationMode.SmoothTransformation)
+                img_label = QLabel(); img_label.setPixmap(pixmap)
                 img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 layout.addWidget(img_label)
 
-        # 解释按钮 + 解释文本区
         self.explain_btn = QPushButton("🔍 AI 解读此图")
-        self.explain_btn.clicked.connect(self._request_explain)
+        self.explain_btn.clicked.connect(self._request)
         layout.addWidget(self.explain_btn)
 
-        self.explain_label = QLabel()
-        self.explain_label.setWordWrap(True)
+        self.explain_label = QLabel(); self.explain_label.setWordWrap(True)
         self.explain_label.setFont(QFont("Microsoft YaHei UI", 12))
-        self.explain_label.setStyleSheet("color: #e0af68; line-height: 1.8; padding: 8px 0;")
+        self.explain_label.setStyleSheet("color: #e0af68; line-height: 1.7; padding: 8px 0;")
+        self.explain_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.explain_label.setVisible(False)
         layout.addWidget(self.explain_label)
 
-    def _request_explain(self):
+        # 追问区
+        self.follow_frame = QFrame()
+        fl = QHBoxLayout(self.follow_frame); fl.setContentsMargins(0, 0, 0, 0); fl.setSpacing(6)
+        self.follow_input = QTextEdit(); self.follow_input.setPlaceholderText("对图片解读追问...")
+        self.follow_input.setMaximumHeight(50); self.follow_input.setMinimumHeight(36)
+        fl.addWidget(self.follow_input, 1)
+        ask_btn = QPushButton("发送"); ask_btn.setObjectName("primaryBtn"); ask_btn.setFixedWidth(60)
+        ask_btn.clicked.connect(self._send_follow)
+        fl.addWidget(ask_btn)
+        self.follow_frame.setVisible(False)
+        layout.addWidget(self.follow_frame)
+
+    def _request(self):
         if not self._explained:
-            self.explain_btn.setText("⏳ 分析中...")
-            self.explain_btn.setEnabled(False)
+            self.explain_btn.setText("⏳ 分析中..."); self.explain_btn.setEnabled(False)
             self.explain_requested.emit(self._image_path)
 
     def show_explanation(self, text: str):
-        self._explained = True
-        self.explain_label.setText(text)
-        self.explain_label.setVisible(True)
-        self.explain_btn.setText("✅ 已解读")
-        self.explain_btn.setStyleSheet("color: #9ece6a;")
+        self._explained = True; self._explain_text = text
+        self.explain_label.setText(text); self.explain_label.setVisible(True)
+        self.explain_btn.setText("✅ 已解读"); self.explain_btn.setStyleSheet("color: #9ece6a;")
+        self.follow_frame.setVisible(True)
 
     def show_explain_error(self, err: str):
-        self.explain_btn.setText("❌ 失败")
-        self.explain_btn.setEnabled(True)
-        self.explain_btn.setToolTip(err)
+        self.explain_btn.setText("❌ 失败"); self.explain_btn.setEnabled(True); self.explain_btn.setToolTip(err)
+
+    def _send_follow(self):
+        q = self.follow_input.toPlainText().strip()
+        if q:
+            ctx = f"图片解读结果：{getattr(self, '_explain_text', '')}\n\n追问：{q}"
+            self.follow_up.emit(ctx, q)
+            self.follow_input.clear()
 
 
 # ========== PDF 阅读器 ==========
@@ -215,6 +236,7 @@ class ImageCard(QFrame):
 class PDFViewerPanel(QWidget):
     pdf_loaded = Signal(str)
     pdf_path_changed = Signal(str)
+    follow_up_question = Signal(str)  # 给主窗口发送追问
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -222,8 +244,8 @@ class PDFViewerPanel(QWidget):
         self._paragraphs: list[dict] = []
         self._cards: list = []
         self._current_path: str = ""
-        self._llm_trans = None   # 翻译客户端
-        self._llm_image = None   # 图析客户端
+        self._llm_trans = None
+        self._llm_image = None
         self._trans_worker: TranslationWorker | None = None
         self._pending: dict[int, str] = {}
         self._image_dir = ""
@@ -355,12 +377,13 @@ class PDFViewerPanel(QWidget):
             if para.get("image_path"):
                 card = ImageCard(para["image_path"], para.get("page", 0))
                 card.explain_requested.connect(self._on_image_explain)
+                card.follow_up.connect(self._on_follow_up)
                 self.card_layout.addWidget(card)
                 self._cards.append(card)
             elif para.get("text", "").strip():
-                # 段落卡片
                 card = ParagraphCard(para, i)
                 card.translate_requested.connect(self._on_translate)
+                card.follow_up.connect(self._on_follow_up)
                 self.card_layout.addWidget(card)
                 self._cards.append(card)
 
@@ -425,34 +448,15 @@ class PDFViewerPanel(QWidget):
                 break
 
     def _explain_image(self, card: ImageCard, image_path: str):
-        """在后台线程中调用图析 API"""
-        import base64
-        class ImageWorker(QThread):
-            done = Signal(str)
-            err = Signal(str)
-            def __init__(self, client, img_path):
-                super().__init__()
-                self._c = client; self._p = img_path
-            def run(self):
-                try:
-                    with open(self._p, "rb") as f:
-                        b64 = base64.b64encode(f.read()).decode()
-                    # 尝试用 vision API 格式（OpenAI 兼容多模态）
-                    r = self._c.chat_sync([{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "请详细解读这张学术论文中的图片/图表。说明它展示的内容、关键数据趋势、以及它在论文中的作用。请用中文回答。"},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-                        ]
-                    }])
-                    self.done.emit(r)
-                except Exception as e:
-                    self.err.emit(str(e))
-
-        self._img_worker = ImageWorker(self._llm_image, image_path)
+        """使用顶层 ImageExplainWorker 防崩溃"""
+        self._img_worker = ImageExplainWorker(self._llm_image, image_path)
         self._img_worker.done.connect(lambda t: (card.show_explanation(t), setattr(self, '_img_worker', None)))
         self._img_worker.err.connect(lambda e: (card.show_explain_error(e), setattr(self, '_img_worker', None)))
         self._img_worker.start()
+
+    def _on_follow_up(self, context: str, question: str):
+        """将翻译/图析后的追问转发给聊天面板"""
+        self.follow_up_question.emit(context)
 
     def get_pdf_text(self) -> str:
         return self._pdf_text

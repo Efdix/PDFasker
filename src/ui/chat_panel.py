@@ -106,8 +106,10 @@ class ChatPanel(QWidget):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setStyleSheet("QScrollArea { background-color: #1a1b26; border: none; }")
 
         self.msg_container = QWidget()
+        self.msg_container.setStyleSheet("background-color: #1a1b26;")
         self.msg_layout = QVBoxLayout(self.msg_container)
         self.msg_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.msg_layout.addStretch()

@@ -111,6 +111,7 @@ class MainWindow(QMainWindow):
         self.pdf_viewer.setMinimumWidth(300)
         self.pdf_viewer.pdf_loaded.connect(self._on_pdf_loaded)
         self.pdf_viewer.pdf_path_changed.connect(self._on_pdf_path_changed)
+        self.pdf_viewer.follow_up_question.connect(self._on_follow_up_from_reader)
 
         self.chat_panel = ChatPanel()
         self.chat_panel.setMinimumWidth(250)
@@ -191,6 +192,23 @@ class MainWindow(QMainWindow):
         if path and path != self.pdf_viewer.get_current_path():
             self._save_current_chat()
             self.pdf_viewer.load_pdf(path)
+
+    def _on_follow_up_from_reader(self, context: str):
+        """读者在翻译/图析后点击追问 → 直接发送到聊天"""
+        if not self._llm_chat:
+            QMessageBox.warning(self, "未配置", "请先配置聊天 API")
+            return
+        self.chat_panel.set_input_enabled(True)
+        # 作为用户消息发送
+        self.chat_panel.add_user_message(f"[追问] {context[:100]}...")
+        self._context_manager.add_to_history("user", context)
+        messages = self._context_manager.build_messages(context)
+        self.chat_panel.start_ai_response()
+        self._llm_worker = LLMWorker(self._llm_chat, messages)
+        self._llm_worker.chunk_received.connect(self._on_ai_chunk)
+        self._llm_worker.finished.connect(self._on_ai_finished)
+        self._llm_worker.error.connect(self._on_ai_error)
+        self._llm_worker.start()
 
     def _on_user_message(self, text: str):
         """用户发送消息"""

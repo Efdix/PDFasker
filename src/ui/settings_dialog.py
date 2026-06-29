@@ -111,12 +111,12 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
 
         self.tabs = QTabWidget()
-        self._chat_tab = APIConfigTab("chat", "💬 聊天 API — 用于基于论文内容的问答对话")
-        self._trans_tab = APIConfigTab("trans", "🌐 翻译 API — 用于英文段落逐段翻译")
-        self._image_tab = APIConfigTab("image", "🖼️ 图析 API — 用于论文中图片/图表的解读（需多模态模型）")
-        self.tabs.addTab(self._chat_tab, "💬 聊天")
+        self._trans_tab = APIConfigTab("trans", "🌐 翻译 API — 英文段落翻译，可用便宜模型")
+        self._image_tab = APIConfigTab("image", "🖼️ 图析 API — 解读图表（需多模态模型，如 GPT-4o / Gemini）")
+        self._chat_tab = APIConfigTab("chat", "💬 聊天 API — 基于论文内容的问答对话，建议用最强模型")
         self.tabs.addTab(self._trans_tab, "🌐 翻译")
         self.tabs.addTab(self._image_tab, "🖼️ 图析")
+        self.tabs.addTab(self._chat_tab, "💬 聊天")
         layout.addWidget(self.tabs)
 
         btn = QHBoxLayout()

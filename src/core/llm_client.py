@@ -50,13 +50,13 @@ class LLMClient:
 PROVIDERS = {
     "DeepSeek": {
         "base_url": "https://api.deepseek.com",
-        "models": [
-            "deepseek-v4-flash",    # ⭐ 推荐：快 + 便宜，1M 上下文
-            "deepseek-v4-pro",      # 最强：深度推理，1M 上下文
-            "deepseek-chat",        # 旧版（2026/7/24 停用）→ 同 v4-flash 非思考模式
-            "deepseek-reasoner",    # 旧版（2026/7/24 停用）→ 同 v4-flash 思考模式
-        ],
-        "description": "DeepSeek V4 系列（1M 上下文 | Flash 实惠 / Pro 最强 | 支持思考模式）",
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        "description": "DeepSeek V4 系列（1M 上下文 | Flash 实惠 / Pro 最强）",
+    },
+    "Mimo": {
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "models": ["mimo-v2.5", "mimo-v2.5-pro"],
+        "description": "Mimo 大模型系列",
     },
     "MiniMax": {
         "base_url": "https://api.minimax.chat/v1",
