@@ -16,7 +16,10 @@ from .ui.chat_panel import ChatPanel
 from .ui.settings_dialog import SettingsDialog
 from .core.llm_client import LLMClient
 from .core.context_manager import ContextManager
-from .utils.config import load_config, add_pdf_to_library
+from .utils.config import (
+    load_config, add_pdf_to_library,
+    load_chat_history, save_chat_history, delete_chat_history,
+)
 
 
 class LLMWorker(QThread):
@@ -41,7 +44,7 @@ class LLMWorker(QThread):
 
 
 class MainWindow(QMainWindow):
-    """PDFasker 主窗口"""
+    """PDFasker 主窗口 —— 三套 API + 文档级聊天隔离"""
 
     def __init__(self):
         super().__init__()
@@ -49,18 +52,19 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
         self.setMinimumSize(900, 600)
 
-        # 核心组件
         self._config = load_config()
-        self._llm_client: LLMClient | None = None
+        self._llm_chat: LLMClient | None = None
+        self._llm_trans: LLMClient | None = None
+        self._llm_image: LLMClient | None = None
         self._context_manager = ContextManager(
             max_tokens=self._config.get("max_tokens", 1_000_000)
         )
         self._llm_worker: LLMWorker | None = None
+        self._current_pdf_path: str = ""
 
-        # UI
         self._setup_ui()
         self._apply_styles()
-        self._try_init_llm_client()
+        self._init_all_clients()
 
     def _setup_ui(self):
         """构建界面布局"""
@@ -145,14 +149,36 @@ class MainWindow(QMainWindow):
         self.pdf_viewer._open_pdf()
 
     def _on_pdf_loaded(self, text: str):
-        """PDF 加载完成后初始化上下文"""
+        """PDF 加载完成：初始化上下文 + 加载历史对话"""
+        # 保存旧文档的对话
+        if self._current_pdf_path:
+            self._save_current_chat()
+
+        self._current_pdf_path = self.pdf_viewer.get_current_path()
         self._context_manager.load_pdf_text(text)
+
+        # 加载该文档的历史对话
+        history = load_chat_history(self._current_pdf_path)
+        self._context_manager._chat_history = history.copy()
+        # 刷新聊天面板
+        self.chat_panel.clear_messages()
+        for msg in history:
+            if msg["role"] == "user":
+                self.chat_panel.add_user_message(msg["content"])
+            elif msg["role"] == "assistant":
+                self.chat_panel._insert_bubble_from_history("assistant", msg["content"])
+
         token_est = self._context_manager.estimate_tokens(text)
         self.status_bar.showMessage(
             f"PDF 已加载 | 约 {token_est:,} tokens | "
-            f"共 {len(text):,} 字符"
+            f"历史 {len(history)} 条对话" + (" (可享缓存优惠)" if history else "")
         )
         self.chat_panel.set_input_enabled(True)
+
+    def _save_current_chat(self):
+        """保存当前文档的对话历史"""
+        if self._current_pdf_path and self._context_manager._chat_history:
+            save_chat_history(self._current_pdf_path, self._context_manager._chat_history)
 
     def _on_pdf_path_changed(self, path: str):
         """PDF 路径变更时更新标题"""
@@ -161,16 +187,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"PDFasker — {fname}" if fname else "PDFasker — AI 论文解读助手")
 
     def _on_library_pdf_selected(self, path: str):
-        """从论文库中选择 PDF"""
+        """从论文库中选择 PDF —— 先保存旧对话再加载新文档"""
         if path and path != self.pdf_viewer.get_current_path():
+            self._save_current_chat()
             self.pdf_viewer.load_pdf(path)
 
     def _on_user_message(self, text: str):
         """用户发送消息"""
-        if not self._llm_client:
+        if not self._llm_chat:
             QMessageBox.warning(
                 self, "未配置 API",
-                "请先配置 API Key 和 Base URL。\n菜单 → 设置 → API 配置"
+                "请先配置聊天 API。\n菜单 → 设置 → API 配置 → 聊天标签页"
             )
             self.chat_panel.set_input_enabled(True)
             return
@@ -196,7 +223,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("AI 正在思考...")
 
         # 后台线程调用 API
-        self._llm_worker = LLMWorker(self._llm_client, messages)
+        self._llm_worker = LLMWorker(self._llm_chat, messages)
         self._llm_worker.chunk_received.connect(self._on_ai_chunk)
         self._llm_worker.finished.connect(self._on_ai_finished)
         self._llm_worker.error.connect(self._on_ai_error)
@@ -207,19 +234,21 @@ class MainWindow(QMainWindow):
         self.chat_panel.append_ai_text(chunk)
 
     def _on_ai_finished(self):
-        """AI 回复完成"""
-        # 收集完整回复存入历史
+        """AI 回复完成 —— 收集全文存入历史并保存"""
         ai_text = ""
         if self.chat_panel._current_ai_bubble:
             layout = self.chat_panel._current_ai_bubble.layout()
             for i in range(layout.count()):
                 w = layout.itemAt(i).widget()
-                if isinstance(w, QLabel) and w.styleSheet() == "":
+                if isinstance(w, QLabel) and "color: #e2e5f2" in (w.styleSheet() or ""):
                     ai_text = w.text()
                     break
 
         self._context_manager.add_to_history("assistant", ai_text)
         self.chat_panel.finish_ai_response()
+        # 实时保存对话历史
+        if self._current_pdf_path:
+            save_chat_history(self._current_pdf_path, self._context_manager._chat_history)
         self.status_bar.showMessage("就绪")
         self._llm_worker = None
 
@@ -237,46 +266,63 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("对话已清空")
 
     def _on_open_settings(self):
-        """打开设置对话框"""
         dialog = SettingsDialog(self)
         if dialog.exec():
             self._config = load_config()
-            self._try_init_llm_client()
+            self._init_all_clients()
             self.status_bar.showMessage("API 配置已更新")
+
+    def _on_clear_chat(self):
+        self._context_manager.clear_history()
+        self.chat_panel.clear_messages()
+        # 同时清除磁盘上的历史
+        if self._current_pdf_path:
+            delete_chat_history(self._current_pdf_path)
+        self.status_bar.showMessage("对话已清空")
 
     def _on_about(self):
         QMessageBox.about(
             self, "关于 PDFasker",
             "<h3>PDFasker</h3>"
-            "<p>AI 论文解读助手 v1.0</p>"
-            "<p>基于大语言模型，帮助你快速理解和分析科研论文。</p>"
-            "<hr>"
-            "<p>支持 DeepSeek、MiniMax 及所有 OpenAI 兼容接口。</p>"
+            "<p>AI 论文解读助手 v2.0</p>"
+            "<p>支持 DeepSeek V4、MiniMax 及所有 OpenAI 兼容接口。</p>"
+            "<p>三套 API 独立配置：聊天 / 翻译 / 图析</p>"
         )
 
-    def _try_init_llm_client(self):
-        """尝试初始化 LLM 客户端"""
-        api_key = self._config.get("api_key", "")
-        base_url = self._config.get("base_url", "")
-        model = self._config.get("model", "")
+    def closeEvent(self, event):
+        """关闭窗口时保存对话"""
+        self._save_current_chat()
+        super().closeEvent(event)
 
-        if api_key and base_url and model:
-            try:
-                self._llm_client = LLMClient(
-                    api_key=api_key,
-                    base_url=base_url,
-                    model=model,
-                )
-                # 注入到 PDF 阅读器（用于段落翻译）
-                self.pdf_viewer.set_llm_client(self._llm_client)
-                self._status_model_label.setText(
-                    f"模型: {model} | API: {self._config.get('provider', '')}"
-                )
-                self._status_model_label.setStyleSheet("color: #a6e3a1; padding: 2px 8px;")
-            except Exception as e:
-                self._llm_client = None
-                self._status_model_label.setText(f"API 初始化失败: {e}")
-                self._status_model_label.setStyleSheet("color: #f38ba8; padding: 2px 8px;")
+    def _init_all_clients(self):
+        """初始化三套 LLM 客户端"""
+        from .utils.config import get_api_config
+
+        def _make_client(key: str) -> LLMClient | None:
+            cfg = get_api_config(self._config, key)
+            if cfg.get("api_key") and cfg.get("base_url") and cfg.get("model"):
+                try:
+                    return LLMClient(cfg["api_key"], cfg["base_url"], cfg["model"])
+                except Exception:
+                    return None
+            return None
+
+        self._llm_chat = _make_client("chat_api")
+        self._llm_trans = _make_client("translation_api")
+        self._llm_image = _make_client("image_api")
+
+        # 注入到子面板
+        self.pdf_viewer.set_translation_client(self._llm_trans)
+        self.pdf_viewer.set_image_client(self._llm_image)
+
+        # 状态栏
+        parts = []
+        if self._llm_chat: parts.append(f"聊天:{self._llm_chat.model}")
+        if self._llm_trans: parts.append(f"翻译:{self._llm_trans.model}")
+        if self._llm_image: parts.append(f"图析:{self._llm_image.model}")
+        if parts:
+            self._status_model_label.setText(" | ".join(parts))
+            self._status_model_label.setStyleSheet("color: #9ece6a; padding: 2px 8px;")
         else:
             self._status_model_label.setText("未配置 API — 请前往设置")
-            self._status_model_label.setStyleSheet("color: #f9e2af; padding: 2px 8px;")
+            self._status_model_label.setStyleSheet("color: #e0af68; padding: 2px 8px;")

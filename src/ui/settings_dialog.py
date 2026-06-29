@@ -1,168 +1,172 @@
 """
-API 配置对话框
+API 配置对话框 —— 聊天 / 翻译 / 图片解析 三套 API 独立配置
 """
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QPushButton, QFormLayout, QGroupBox, QMessageBox,
+    QTabWidget, QWidget,
 )
 from PySide6.QtCore import Qt
 
 from ..core.llm_client import PROVIDERS
-from ..utils.config import load_config, save_config
+from ..utils.config import load_config, save_config, get_api_config
+
+
+class APIConfigTab(QWidget):
+    """单个 API 配置标签页"""
+
+    def __init__(self, tab_name: str, description: str, parent=None):
+        super().__init__(parent)
+        self._tab_name = tab_name
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        desc = QLabel(description)
+        desc.setObjectName("subtitleLabel")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        provider_group = QGroupBox("提供商")
+        pg = QVBoxLayout(provider_group)
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(list(PROVIDERS.keys()))
+        self.provider_combo.currentTextChanged.connect(self._on_provider)
+        pg.addWidget(self.provider_combo)
+        self.provider_desc = QLabel()
+        self.provider_desc.setObjectName("subtitleLabel")
+        self.provider_desc.setWordWrap(True)
+        pg.addWidget(self.provider_desc)
+        layout.addWidget(provider_group)
+
+        cfg = QGroupBox("连接参数")
+        form = QFormLayout(cfg)
+        self.api_key = QLineEdit()
+        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key.setPlaceholderText("sk-...")
+        form.addRow("API Key:", self.api_key)
+        self.base_url = QLineEdit()
+        self.base_url.setPlaceholderText("https://api.deepseek.com")
+        form.addRow("Base URL:", self.base_url)
+        self.model = QComboBox()
+        self.model.setEditable(True)
+        self.model.setPlaceholderText("deepseek-v4-flash")
+        form.addRow("模型:", self.model)
+        layout.addWidget(cfg)
+
+        layout.addStretch()
+
+    def _on_provider(self, name: str):
+        info = PROVIDERS.get(name, {})
+        self.provider_desc.setText(info.get("description", ""))
+        self.base_url.setText(info.get("base_url", ""))
+        self.model.clear()
+        for m in info.get("models", []):
+            self.model.addItem(m)
+        if self.model.count() > 0:
+            self.model.setCurrentIndex(0)
+
+    def load(self, api_cfg: dict):
+        p = api_cfg.get("provider", "DeepSeek")
+        idx = self.provider_combo.findText(p)
+        if idx >= 0:
+            self.provider_combo.setCurrentIndex(idx)
+        self.api_key.setText(api_cfg.get("api_key", ""))
+        self.base_url.setText(api_cfg.get("base_url", ""))
+        m = api_cfg.get("model", "")
+        if m:
+            idx = self.model.findText(m)
+            if idx >= 0:
+                self.model.setCurrentIndex(idx)
+            else:
+                self.model.setCurrentText(m)
+
+    def get(self) -> dict:
+        return {
+            "provider": self.provider_combo.currentText(),
+            "api_key": self.api_key.text().strip(),
+            "base_url": self.base_url.text().strip(),
+            "model": self.model.currentText().strip(),
+        }
 
 
 class SettingsDialog(QDialog):
-    """API 配置设置对话框"""
+    """三标签页 API 配置对话框"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("API 配置")
-        self.setMinimumWidth(480)
+        self.setMinimumSize(520, 500)
         self.setModal(True)
         self._config = load_config()
         self._setup_ui()
-        self._load_values()
+        self._load()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(16)
+        layout.setSpacing(12)
 
-        # 标题
-        title = QLabel("⚙️  大模型 API 配置")
+        title = QLabel("API 配置")
         title.setObjectName("titleLabel")
         layout.addWidget(title)
 
-        # 提供商选择
-        provider_group = QGroupBox("API 提供商")
-        provider_layout = QVBoxLayout(provider_group)
+        self.tabs = QTabWidget()
+        self._chat_tab = APIConfigTab("chat", "💬 聊天 API — 用于基于论文内容的问答对话")
+        self._trans_tab = APIConfigTab("trans", "🌐 翻译 API — 用于英文段落逐段翻译")
+        self._image_tab = APIConfigTab("image", "🖼️ 图析 API — 用于论文中图片/图表的解读（需多模态模型）")
+        self.tabs.addTab(self._chat_tab, "💬 聊天")
+        self.tabs.addTab(self._trans_tab, "🌐 翻译")
+        self.tabs.addTab(self._image_tab, "🖼️ 图析")
+        layout.addWidget(self.tabs)
 
-        self.provider_combo = QComboBox()
-        self.provider_combo.addItems(list(PROVIDERS.keys()))
-        self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
-        provider_layout.addWidget(self.provider_combo)
+        btn = QHBoxLayout()
+        btn.addStretch()
+        test = QPushButton("测试当前标签页连接")
+        test.clicked.connect(self._test)
+        btn.addWidget(test)
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        btn.addWidget(cancel)
+        save = QPushButton("保存全部")
+        save.setObjectName("primaryBtn")
+        save.clicked.connect(self._save)
+        btn.addWidget(save)
+        layout.addLayout(btn)
 
-        self.provider_desc = QLabel()
-        self.provider_desc.setObjectName("subtitleLabel")
-        self.provider_desc.setWordWrap(True)
-        provider_layout.addWidget(self.provider_desc)
-        layout.addWidget(provider_group)
+    def _current_tab(self) -> APIConfigTab:
+        idx = self.tabs.currentIndex()
+        return [self._chat_tab, self._trans_tab, self._image_tab][idx]
 
-        # 详细配置
-        config_group = QGroupBox("连接参数")
-        form = QFormLayout(config_group)
+    def _load(self):
+        self._chat_tab.load(get_api_config(self._config, "chat_api"))
+        self._trans_tab.load(get_api_config(self._config, "translation_api"))
+        self._image_tab.load(get_api_config(self._config, "image_api"))
 
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key_input.setPlaceholderText("输入你的 API Key...")
-        form.addRow("API Key:", self.api_key_input)
-
-        self.base_url_input = QLineEdit()
-        self.base_url_input.setPlaceholderText("https://api.deepseek.com")
-        form.addRow("Base URL:", self.base_url_input)
-
-        self.model_combo = QComboBox()
-        self.model_combo.setEditable(True)
-        self.model_combo.setPlaceholderText("选择或输入模型名称...")
-        form.addRow("模型:", self.model_combo)
-
-        layout.addWidget(config_group)
-
-        # 按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-
-        test_btn = QPushButton("测试连接")
-        test_btn.clicked.connect(self._test_connection)
-        btn_layout.addWidget(test_btn)
-
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(cancel_btn)
-
-        save_btn = QPushButton("保存")
-        save_btn.setObjectName("primaryBtn")
-        save_btn.clicked.connect(self._save_and_accept)
-        btn_layout.addWidget(save_btn)
-
-        layout.addLayout(btn_layout)
-
-    def _load_values(self):
-        """加载已保存的配置"""
-        provider = self._config.get("provider", "DeepSeek")
-        idx = self.provider_combo.findText(provider)
-        if idx >= 0:
-            self.provider_combo.setCurrentIndex(idx)
-        else:
-            self.provider_combo.setCurrentIndex(0)
-
-        self.api_key_input.setText(self._config.get("api_key", ""))
-        self.base_url_input.setText(self._config.get("base_url", ""))
-        model = self._config.get("model", "")
-        if model:
-            idx = self.model_combo.findText(model)
-            if idx >= 0:
-                self.model_combo.setCurrentIndex(idx)
-            else:
-                self.model_combo.setCurrentText(model)
-
-    def _on_provider_changed(self, name: str):
-        """切换提供商时更新预设"""
-        info = PROVIDERS.get(name, {})
-        self.provider_desc.setText(info.get("description", ""))
-        self.base_url_input.setText(info.get("base_url", ""))
-
-        self.model_combo.clear()
-        models = info.get("models", [])
-        if models:
-            self.model_combo.addItems(models)
-            self.model_combo.setCurrentIndex(0)
-
-    def _get_current_config(self) -> dict:
-        return {
-            "provider": self.provider_combo.currentText(),
-            "api_key": self.api_key_input.text().strip(),
-            "base_url": self.base_url_input.text().strip(),
-            "model": self.model_combo.currentText().strip(),
-            "max_tokens": self._config.get("max_tokens", 120_000),
-        }
-
-    def _test_connection(self):
-        """测试 API 连接"""
-        config = self._get_current_config()
-        if not config["api_key"]:
-            QMessageBox.warning(self, "提示", "请先输入 API Key")
+    def _test(self):
+        tab = self._current_tab()
+        cfg = tab.get()
+        if not cfg["api_key"] or not cfg["base_url"]:
+            QMessageBox.warning(self, "提示", "请填写 API Key 和 Base URL")
             return
-        if not config["base_url"]:
-            QMessageBox.warning(self, "提示", "请先输入 Base URL")
-            return
-
         try:
             from ..core.llm_client import LLMClient
-            client = LLMClient(
-                api_key=config["api_key"],
-                base_url=config["base_url"],
-                model=config["model"] or "default",
-            )
-            reply = client.chat_sync([
-                {"role": "user", "content": "你好，请回复'连接成功'即可。"}
-            ])
-            QMessageBox.information(self, "成功", f"连接成功！\n回复：{reply[:100]}")
+            c = LLMClient(cfg["api_key"], cfg["base_url"], cfg["model"] or "default")
+            r = c.chat_sync([{"role": "user", "content": "回复'OK'即可"}])
+            QMessageBox.information(self, "成功", f"连接成功！\n回复：{r[:100]}")
         except Exception as e:
-            QMessageBox.critical(self, "连接失败", f"无法连接：\n{str(e)}")
+            QMessageBox.critical(self, "失败", str(e))
 
-    def _save_and_accept(self):
-        """保存并关闭"""
-        config = self._get_current_config()
-        if not config["api_key"]:
-            QMessageBox.warning(self, "提示", "请输入 API Key")
-            return
-        if not config["base_url"]:
-            QMessageBox.warning(self, "提示", "请输入 Base URL")
-            return
+    def _save(self):
+        ck_api = self._chat_tab.get()
+        tr_api = self._trans_tab.get()
+        im_api = self._image_tab.get()
+        for api, name in [(ck_api, "聊天"), (tr_api, "翻译"), (im_api, "图析")]:
+            if not api["api_key"]:
+                QMessageBox.warning(self, "提示", f"请填写{name} API 的 Key")
+                return
 
-        save_config(config)
+        self._config["chat_api"] = ck_api
+        self._config["translation_api"] = tr_api
+        self._config["image_api"] = im_api
+        save_config(self._config)
         self.accept()
-
-    def get_config(self) -> dict:
-        return self._get_current_config()

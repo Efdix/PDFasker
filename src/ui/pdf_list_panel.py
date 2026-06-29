@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QDragEnterEvent, QDropEvent
 
 from ..utils.config import (
     load_config, save_config, load_library, save_library,
@@ -21,7 +22,7 @@ from ..utils.config import (
 
 
 class PDFListPanel(QWidget):
-    """左侧 PDF 文件列表面板"""
+    """左侧 PDF 文件列表面板 —— 支持拖拽导入"""
 
     pdf_selected = Signal(str)
     pdf_removed = Signal(str)
@@ -30,6 +31,7 @@ class PDFListPanel(QWidget):
         super().__init__(parent)
         self.setMinimumWidth(180)
         self.setMaximumWidth(320)
+        self.setAcceptDrops(True)
         self._library: list[dict] = []
         self._setup_ui()
         self._refresh()
@@ -151,15 +153,16 @@ class PDFListPanel(QWidget):
     def _import_pdf(self):
         config = load_config()
         lib_path = config.get("library_path", str(Path.home() / "Documents" / "PDFasker_Library"))
-
         files, _ = QFileDialog.getOpenFileNames(
             self, "导入 PDF 论文", "", "PDF 文件 (*.pdf);;所有文件 (*.*)"
         )
-        if not files:
-            return
+        if files:
+            self._import_files(files)
 
+    def _import_files(self, files: list[str]):
+        config = load_config()
+        lib_path = config.get("library_path", str(Path.home() / "Documents" / "PDFasker_Library"))
         os.makedirs(lib_path, exist_ok=True)
-
         for file_path in files:
             fname = os.path.basename(file_path)
             dest = os.path.join(lib_path, fname)
@@ -178,7 +181,6 @@ class PDFListPanel(QWidget):
                 })
             except OSError as e:
                 QMessageBox.warning(self, "导入失败", str(e))
-
         self._refresh()
 
     def _new_folder(self):
@@ -274,3 +276,22 @@ class PDFListPanel(QWidget):
                     item["folder"] = ""
             save_library(lib)
             self._refresh()
+
+    # ========== 拖拽导入 ==========
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith(".pdf"):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent):
+        paths = []
+        for url in event.mimeData().urls():
+            p = url.toLocalFile()
+            if p.lower().endswith(".pdf"):
+                paths.append(p)
+        if paths:
+            self._import_files(paths)

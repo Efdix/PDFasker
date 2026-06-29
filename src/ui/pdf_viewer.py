@@ -144,10 +144,14 @@ class ParagraphCard(QFrame):
 # ========== 图片卡片 ==========
 
 class ImageCard(QFrame):
-    """PDF 中的图片"""
+    """PDF 中的图片 —— 支持 AI 解释"""
+
+    explain_requested = Signal(str)  # image_path
 
     def __init__(self, image_path: str, page: int, parent=None):
         super().__init__(parent)
+        self._image_path = image_path
+        self._explained = False
         self.setStyleSheet(
             "ImageCard {"
             "  background-color: #1a1b26;"
@@ -168,13 +172,42 @@ class ImageCard(QFrame):
         if image_path and os.path.exists(image_path):
             pixmap = QPixmap(image_path)
             if not pixmap.isNull():
-                # 限制最大宽度
-                if pixmap.width() > 600:
-                    pixmap = pixmap.scaledToWidth(600, Qt.TransformationMode.SmoothTransformation)
+                if pixmap.width() > 550:
+                    pixmap = pixmap.scaledToWidth(550, Qt.TransformationMode.SmoothTransformation)
                 img_label = QLabel()
                 img_label.setPixmap(pixmap)
                 img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 layout.addWidget(img_label)
+
+        # 解释按钮 + 解释文本区
+        self.explain_btn = QPushButton("🔍 AI 解读此图")
+        self.explain_btn.clicked.connect(self._request_explain)
+        layout.addWidget(self.explain_btn)
+
+        self.explain_label = QLabel()
+        self.explain_label.setWordWrap(True)
+        self.explain_label.setFont(QFont("Microsoft YaHei UI", 12))
+        self.explain_label.setStyleSheet("color: #e0af68; line-height: 1.8; padding: 8px 0;")
+        self.explain_label.setVisible(False)
+        layout.addWidget(self.explain_label)
+
+    def _request_explain(self):
+        if not self._explained:
+            self.explain_btn.setText("⏳ 分析中...")
+            self.explain_btn.setEnabled(False)
+            self.explain_requested.emit(self._image_path)
+
+    def show_explanation(self, text: str):
+        self._explained = True
+        self.explain_label.setText(text)
+        self.explain_label.setVisible(True)
+        self.explain_btn.setText("✅ 已解读")
+        self.explain_btn.setStyleSheet("color: #9ece6a;")
+
+    def show_explain_error(self, err: str):
+        self.explain_btn.setText("❌ 失败")
+        self.explain_btn.setEnabled(True)
+        self.explain_btn.setToolTip(err)
 
 
 # ========== PDF 阅读器 ==========
@@ -189,14 +222,18 @@ class PDFViewerPanel(QWidget):
         self._paragraphs: list[dict] = []
         self._cards: list = []
         self._current_path: str = ""
-        self._llm_client = None
+        self._llm_trans = None   # 翻译客户端
+        self._llm_image = None   # 图析客户端
         self._trans_worker: TranslationWorker | None = None
         self._pending: dict[int, str] = {}
         self._image_dir = ""
         self._setup_ui()
 
-    def set_llm_client(self, client):
-        self._llm_client = client
+    def set_translation_client(self, client):
+        self._llm_trans = client
+
+    def set_image_client(self, client):
+        self._llm_image = client
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -316,8 +353,8 @@ class PDFViewerPanel(QWidget):
 
         for i, para in enumerate(self._paragraphs):
             if para.get("image_path"):
-                # 图片卡片
                 card = ImageCard(para["image_path"], para.get("page", 0))
+                card.explain_requested.connect(self._on_image_explain)
                 self.card_layout.addWidget(card)
                 self._cards.append(card)
             elif para.get("text", "").strip():
@@ -330,7 +367,7 @@ class PDFViewerPanel(QWidget):
         self.card_layout.addStretch()
 
     def _on_translate(self, idx: int, text: str):
-        if not self._llm_client:
+        if not self._llm_trans:
             return
         if self._trans_worker and self._trans_worker.isRunning():
             self._pending[idx] = text
@@ -338,7 +375,7 @@ class PDFViewerPanel(QWidget):
         self._start_trans(idx, text)
 
     def _start_trans(self, idx: int, text: str):
-        self._trans_worker = TranslationWorker(self._llm_client, idx, text)
+        self._trans_worker = TranslationWorker(self._llm_trans, idx, text)
         self._trans_worker.finished.connect(self._on_done)
         self._trans_worker.error.connect(self._on_err)
         self._trans_worker.start()
@@ -364,7 +401,7 @@ class PDFViewerPanel(QWidget):
             self._start_trans(idx, text)
 
     def _batch_translate(self):
-        if not self._llm_client:
+        if not self._llm_trans:
             return
         self.batch_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
@@ -376,6 +413,46 @@ class PDFViewerPanel(QWidget):
         if count == 0:
             self.progress_bar.setVisible(False)
             self.batch_btn.setEnabled(True)
+
+    def _on_image_explain(self, image_path: str):
+        """处理图片解释请求"""
+        if not self._llm_image or not image_path:
+            return
+        # 找到发起请求的卡片
+        for card in self._cards:
+            if isinstance(card, ImageCard) and card._image_path == image_path and not card._explained:
+                self._explain_image(card, image_path)
+                break
+
+    def _explain_image(self, card: ImageCard, image_path: str):
+        """在后台线程中调用图析 API"""
+        import base64
+        class ImageWorker(QThread):
+            done = Signal(str)
+            err = Signal(str)
+            def __init__(self, client, img_path):
+                super().__init__()
+                self._c = client; self._p = img_path
+            def run(self):
+                try:
+                    with open(self._p, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode()
+                    # 尝试用 vision API 格式（OpenAI 兼容多模态）
+                    r = self._c.chat_sync([{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "请详细解读这张学术论文中的图片/图表。说明它展示的内容、关键数据趋势、以及它在论文中的作用。请用中文回答。"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                        ]
+                    }])
+                    self.done.emit(r)
+                except Exception as e:
+                    self.err.emit(str(e))
+
+        self._img_worker = ImageWorker(self._llm_image, image_path)
+        self._img_worker.done.connect(lambda t: (card.show_explanation(t), setattr(self, '_img_worker', None)))
+        self._img_worker.err.connect(lambda e: (card.show_explain_error(e), setattr(self, '_img_worker', None)))
+        self._img_worker.start()
 
     def get_pdf_text(self) -> str:
         return self._pdf_text

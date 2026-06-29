@@ -208,13 +208,18 @@ class ChatPanel(QWidget):
         """清除所有消息"""
         self._bubbles.clear()
         self._current_ai_bubble = None
-        # 清除消息容器中的内容
         while self.msg_layout.count() > 1:
             item = self.msg_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self.msg_layout.addStretch()
         self.send_btn.setEnabled(True)
+
+    def _insert_bubble_from_history(self, role: str, content: str):
+        """从历史记录恢复气泡（不做动画）"""
+        bubble = ChatBubble(role, content)
+        self._insert_bubble(bubble)
+        self._bubbles.append(bubble)
 
     def set_input_enabled(self, enabled: bool):
         """设置输入框是否可用"""
