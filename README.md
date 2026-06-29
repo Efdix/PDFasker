@@ -197,11 +197,20 @@ PDFasker/
 - **Moonshot/Kimi** (moonshot-v1)
 - 任何兼容 `/v1/chat/completions` 的 API
 
-### Q: API Key 安全吗？
-**A:** API Key 存储在 `%USERPROFILE%\.pdfasker\config.json`，不上传任何服务器。
+### Q: 数据存在哪里？
+**A:** 所有数据都在你设置的 PDF 图书馆目录下的 `.pdfasker/` 子文件夹中：
 
-### Q: 聊天记录保存在哪？
-**A:** 在 `%USERPROFILE%\.pdfasker\chats\` 目录下，按文档 ID 隔离存储。**不是**保存在你设置的 PDF 图书馆目录里。每篇论文的对话独立保存，切换论文时自动加载历史。
+```
+你的图书馆目录/
+├── .pdfasker/
+│   ├── config.json       # API 配置
+│   ├── library.json      # PDF 列表
+│   ├── chats/            # 对话历史（按文档隔离）
+│   └── image_cache/      # PDF 图片提取缓存
+└── *.pdf                 # 你导入的论文
+```
+
+> 可在设置中修改图书馆路径，修改后新数据将写入新位置。
 
 ### Q: 支持多长的论文？
 **A:** DeepSeek V4 支持 **1M tokens** 上下文窗口，可以一次性处理几百页的论文。即使整本博士论文也绰绰有余。

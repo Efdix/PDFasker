@@ -2,7 +2,7 @@
 PDF 阅读器 —— 结构化段落 + 图片展示 + 中英对照 + 追问
 """
 
-import os, base64, tempfile
+import os, base64
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QPushButton,
     QLabel, QFrame, QFileDialog, QProgressBar, QTextEdit,
@@ -338,12 +338,12 @@ class PDFViewerPanel(QWidget):
 
         try:
             from ..core.pdf_parser import PDFParser
+            from ..utils.config import get_image_cache_dir
 
             self.info_label.setText("⏳ 解析中...")
             self.info_label.setStyleSheet("color: #e0af68;")
 
-            # 创建临时图片目录
-            self._image_dir = tempfile.mkdtemp(prefix="pdfasker_img_")
+            self._image_dir = str(get_image_cache_dir())
 
             with PDFParser(file_path) as parser:
                 parser.set_image_output_dir(self._image_dir)
