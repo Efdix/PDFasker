@@ -5,7 +5,7 @@ PDF 阅读器 —— 结构化段落 + 图片展示 + 中英对照 + 追问
 import os, base64
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QPushButton,
-    QLabel, QFrame, QFileDialog, QProgressBar, QTextEdit,
+    QLabel, QFrame, QFileDialog, QProgressBar, QTextEdit, QSizePolicy,
 )
 from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtGui import QFont, QPixmap
@@ -70,6 +70,7 @@ class ParagraphCard(QFrame):
         self._index = index
         self._text = para.get("text", "")
         self._is_heading = para.get("is_heading", False)
+        self._is_meta = para.get("is_meta", False)
         self._is_english = self._detect_en(self._text)
         self._translated = False
         self._setup_ui()
@@ -80,14 +81,19 @@ class ParagraphCard(QFrame):
         return (ascii_chars / max(len(text), 1)) > 0.4
 
     def _setup_ui(self):
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setStyleSheet(
-            "ParagraphCard { background-color: #1a1b26; border: 1px solid #2a2c3d; border-radius: 10px; margin: 6px 12px; }"
+            "ParagraphCard { background-color: #1a1b26; border: 1px solid #2a2c3d; border-radius: 10px; margin: 3px 0px; }"
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(8)
+        layout.setContentsMargins(18, 10, 18, 10)
+        layout.setSpacing(6)
 
-        if self._is_heading:
+        if self._is_meta:
+            f = QFont("Microsoft YaHei UI", 10)
+            self.text_label = QLabel(self._text); self.text_label.setFont(f)
+            self.text_label.setStyleSheet("color: #636688; line-height: 1.4; padding: 1px 0;")
+        elif self._is_heading:
             f = QFont("Microsoft YaHei UI", 14); f.setBold(True)
             self.text_label = QLabel(self._text); self.text_label.setFont(f)
             self.text_label.setStyleSheet("color: #7aa2f7; padding: 4px 0;")
@@ -100,8 +106,8 @@ class ParagraphCard(QFrame):
         self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.text_label)
 
-        # 翻译按钮：非标题且有内容就显示
-        if not self._is_heading and len(self._text.strip()) > 30:
+        # 翻译按钮：非标题、非元信息、有内容就显示
+        if not self._is_heading and not self._is_meta and len(self._text.strip()) > 20:
             sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
             sep.setStyleSheet("background-color: #2a2c3d; max-height: 1px;")
             self.trans_sep = sep; layout.addWidget(self.trans_sep)

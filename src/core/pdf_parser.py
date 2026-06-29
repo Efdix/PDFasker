@@ -98,31 +98,31 @@ class PDFParser:
 
     def extract_structured_paragraphs(self) -> list[dict]:
         """
-        智能分段：基于文本块位置和字体信息。
-        后续对过长段落做句子级切分，方便阅读。
+        智能分段。先按块+间距分逻辑段，再句子级切分，同时识别元信息。
         """
         import re
         blocks = self.extract_blocks()
         images = {img["page"]: img for img in self.extract_images()}
 
-        raw_paras = []  # [{text, is_heading, page, image_path}]
+        raw_paras = []
         current_lines = []
+        current_fonts = []  # 当前段落各行的字号
         current_page = 1
         last_y = -999
-        last_font = 10
 
         for block in blocks:
             if block["type"] == "image_placeholder":
                 if current_lines:
                     raw_paras.append({
                         "text": "\n".join(current_lines),
-                        "is_heading": self._is_heading(" ".join(current_lines), last_font),
+                        "is_heading": self._is_heading(" ".join(current_lines), current_fonts),
+                        "is_meta": self._is_metadata(" ".join(current_lines)),
                         "page": current_page, "image_path": "",
                     })
-                    current_lines = []
+                    current_lines = []; current_fonts = []
                 img = images.get(block["page"])
                 raw_paras.append({
-                    "text": "", "is_heading": False,
+                    "text": "", "is_heading": False, "is_meta": False,
                     "page": block["page"],
                     "image_path": img["path"] if img else "",
                 })
@@ -135,39 +135,41 @@ class PDFParser:
                 if current_lines:
                     raw_paras.append({
                         "text": "\n".join(current_lines),
-                        "is_heading": self._is_heading(" ".join(current_lines), last_font),
+                        "is_heading": self._is_heading(" ".join(current_lines), current_fonts),
+                        "is_meta": self._is_metadata(" ".join(current_lines)),
                         "page": current_page, "image_path": "",
                     })
-                    current_lines = []
+                    current_lines = []; current_fonts = []
                 current_page = page; last_y = -999
 
             gap = y - last_y if last_y > 0 else 0
             if gap > fs * 2.5 and current_lines:
                 raw_paras.append({
                     "text": "\n".join(current_lines),
-                    "is_heading": self._is_heading(" ".join(current_lines), last_font),
+                    "is_heading": self._is_heading(" ".join(current_lines), current_fonts),
+                    "is_meta": self._is_metadata(" ".join(current_lines)),
                     "page": page, "image_path": "",
                 })
-                current_lines = []
+                current_lines = []; current_fonts = []
 
             current_lines.append(text)
+            current_fonts.append(fs)
             last_y = y
-            last_font = max(last_font, fs)
 
         if current_lines:
             raw_paras.append({
                 "text": "\n".join(current_lines),
-                "is_heading": self._is_heading(" ".join(current_lines), last_font),
+                "is_heading": self._is_heading(" ".join(current_lines), current_fonts),
+                "is_meta": self._is_metadata(" ".join(current_lines)),
                 "page": current_page, "image_path": "",
             })
 
-        # 后处理：对过长的段落做句子级切分
+        # 后处理：句子级切分（阈值 200 字/段）
         result = []
         for para in raw_paras:
-            if para["image_path"] or para["is_heading"] or len(para["text"]) < 300:
+            if para["image_path"] or para["is_heading"] or para["is_meta"] or len(para["text"]) < 200:
                 result.append(para)
             else:
-                # 在句子边界处切分（英文用 . ! ? 后跟空格+大写，中文用。！？）
                 sentences = re.split(
                     r'(?<=[.!?])\s+(?=[A-Z])|(?<=[。！？])\s*',
                     para["text"]
@@ -176,32 +178,50 @@ class PDFParser:
                 for s in sentences:
                     s = s.strip()
                     if not s: continue
-                    if len(buffer) + len(s) < 400:
+                    if len(buffer) + len(s) < 200:
                         buffer = (buffer + " " + s).strip() if buffer else s
                     else:
                         if buffer:
-                            result.append({**para, "text": buffer})
+                            result.append({**para, "text": buffer, "is_heading": False})
                         buffer = s
                 if buffer:
-                    result.append({**para, "text": buffer})
+                    result.append({**para, "text": buffer, "is_heading": False})
 
         return result
 
-    def _is_heading(self, text: str, font_size: float) -> bool:
-        """判断文本是否是章节标题"""
-        if not text:
-            return False
-        # 字号明显大于正文（正文一般 9-11pt）
-        if font_size > 13:
+    def _is_heading(self, text: str, fonts: list[float]) -> bool:
+        """用段落内第一行字号 + 内容特征判断""" 
+        if not text or not fonts: return False
+        first_font = fonts[0]
+        if first_font > 13: return True
+        if len(text) < 80 and first_font > 11: return True
+        if len(text) < 100 and text.strip().isupper(): return True
+        if len(text) < 120 and (text.strip()[0].isdigit() or text.strip().startswith(("I", "II", "III", "IV", "V"))):
             return True
-        # 全大写且短
-        if len(text) < 100 and text.isupper():
+        return False
+
+    def _is_metadata(self, text: str) -> bool:
+        """识别作者、单位、DOI、日期、版权等元信息"""
+        import re
+        t = text.strip()
+        if len(t) > 500: return False  # 太长不是元信息
+        # 作者列表模式：名字, 名字, ... 或 名姓上标数字
+        if re.search(r'^[\w\-\s,;．·•\d†‡*⊛⍟]+$', t) and len(t) < 300 and t.count(',') >= 2:
             return True
-        # 编号开头
-        if len(text) < 120 and (
-            text[0].isdigit() or text.startswith(("I", "II", "III", "IV", "V"))
-        ):
-            return True
+        # 邮箱
+        if re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', t): return True
+        # DOI
+        if re.search(r'10\.\d{4,}/', t): return True
+        # 日期/投稿信息
+        if re.match(r'^(Received|Accepted|Published|Submitted|Date|Posted)', t, re.IGNORECASE): return True
+        # 版权/会议信息
+        if re.search(r'(©|Copyright|All rights reserved|IEEE|ACM|Proceedings|Conference|Workshop|Symposium)', t): return True
+        # 作者标注：纯数字+逗号列表（上标机构编号）
+        if re.match(r'^[\d,\s]+$', t) and len(t) < 50: return True
+        # 通讯作者标注
+        if re.search(r'(corresponding author|email:|E-mail:|✉)', t, re.IGNORECASE): return True
+        # "Keywords", "Index Terms" 等标签行
+        if re.match(r'^(Keywords|Index Terms|Key words|MSC|PACS|JEL)', t, re.IGNORECASE) and len(t) < 200: return True
         return False
 
     # ========== 图片提取 ==========
