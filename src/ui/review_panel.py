@@ -6,11 +6,11 @@ import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton,
     QScrollArea, QLabel, QFrame, QSplitter, QProgressBar,
-    QListWidget, QListWidgetItem, QMessageBox, QFileDialog,
+    QMessageBox, QFileDialog,
     QSizePolicy, QGroupBox,
 )
-from PySide6.QtCore import Qt, Signal, QThread
-from PySide6.QtGui import QFont, QColor, QTextCursor
+from PySide6.QtCore import Qt, Signal, QThread, QTimer
+from PySide6.QtGui import QFont, QTextCursor
 
 from ..core.review_checker import ReviewChecker, CitationClaim, ReviewCheckResult
 from ..core.zotero_parser import ZoteroLibrary, ZoteroItem
@@ -111,13 +111,63 @@ class ClaimResultCard(QFrame):
 
         layout.addLayout(verdict_row)
 
-        # 综述原文
-        claim_section = QLabel(f"📝 你的原文：{self._claim.claim_text}")
-        claim_section.setWordWrap(True)
-        claim_section.setStyleSheet("color: #cfd2e3; font-size: 13px; line-height: 1.5; padding: 4px 0;")
-        layout.addWidget(claim_section)
+        # 左右对照：综述原文 | AI 改写建议
+        if self._claim.rewrite_suggestion and "无需大幅修改" not in self._claim.rewrite_suggestion:
+            compare = QHBoxLayout()
+            compare.setSpacing(8)
 
-        # AI 反馈
+            # 左：原文
+            left_frame = QFrame()
+            left_frame.setStyleSheet("background-color: #1e2030; border: 1px solid #3b3d54; border-radius: 8px;")
+            ll = QVBoxLayout(left_frame)
+            ll.setContentsMargins(10, 8, 10, 8)
+            lh = QLabel("📝 你的原文")
+            lh.setStyleSheet("color: #8a8ea6; font-size: 11px; font-weight: bold;")
+            ll.addWidget(lh)
+            lt = QLabel(self._claim.claim_text)
+            lt.setWordWrap(True)
+            lt.setStyleSheet("color: #cfd2e3; font-size: 12px; line-height: 1.5;")
+            lt.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            ll.addWidget(lt)
+            compare.addWidget(left_frame, 1)
+
+            # 右：AI 建议
+            right_frame = QFrame()
+            right_frame.setStyleSheet("background-color: #1e2030; border: 1px solid #7aa2f7; border-radius: 8px;")
+            rl = QVBoxLayout(right_frame)
+            rl.setContentsMargins(10, 8, 10, 8)
+            rh_row = QHBoxLayout()
+            rh = QLabel("✨ 建议改写")
+            rh.setStyleSheet("color: #7aa2f7; font-size: 11px; font-weight: bold;")
+            rh_row.addWidget(rh)
+            rh_row.addStretch()
+            copy_btn = QPushButton("📋 复制")
+            copy_btn.setFixedWidth(64)
+            copy_btn.setStyleSheet(
+                "QPushButton { background-color: #2a2c3d; color: #7aa2f7; border: 1px solid #3b3d54; "
+                "border-radius: 4px; padding: 2px 6px; font-size: 11px; }"
+                "QPushButton:hover { background-color: #3b3d54; }"
+            )
+            copy_text = self._claim.rewrite_suggestion
+            copy_btn.clicked.connect(lambda checked=False, t=copy_text: self._copy_to_clipboard(t))
+            rh_row.addWidget(copy_btn)
+            rl.addLayout(rh_row)
+            rt = QLabel(self._claim.rewrite_suggestion)
+            rt.setWordWrap(True)
+            rt.setStyleSheet("color: #e2e5f2; font-size: 12px; line-height: 1.6;")
+            rt.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            rl.addWidget(rt)
+            compare.addWidget(right_frame, 1)
+
+            layout.addLayout(compare)
+        else:
+            # 无改写建议，仅显示原文
+            claim_section = QLabel(f"📝 你的原文：{self._claim.claim_text}")
+            claim_section.setWordWrap(True)
+            claim_section.setStyleSheet("color: #cfd2e3; font-size: 13px; line-height: 1.5; padding: 4px 0;")
+            layout.addWidget(claim_section)
+
+        # AI 反馈（诊断）
         if self._claim.ai_feedback:
             feedback = QLabel(self._claim.ai_feedback)
             feedback.setWordWrap(True)
@@ -125,28 +175,20 @@ class ClaimResultCard(QFrame):
             feedback.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             layout.addWidget(feedback)
 
-        # 建议改写版本（高亮显示）
-        if self._claim.rewrite_suggestion and "无需大幅修改" not in self._claim.rewrite_suggestion:
-            sug_frame = QFrame()
-            sug_frame.setStyleSheet(
-                "background-color: #1e2030; border: 1px solid #7aa2f7; border-radius: 8px;"
-            )
-            sug_layout = QVBoxLayout(sug_frame)
-            sug_layout.setContentsMargins(12, 8, 12, 8)
-            sug_header = QLabel("✨ 建议改写为：")
-            sug_header.setStyleSheet("color: #7aa2f7; font-size: 12px; font-weight: bold;")
-            sug_layout.addWidget(sug_header)
-            sug_text = QLabel(self._claim.rewrite_suggestion)
-            sug_text.setWordWrap(True)
-            sug_text.setStyleSheet("color: #e2e5f2; font-size: 13px; line-height: 1.6;")
-            sug_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            sug_layout.addWidget(sug_text)
-            layout.addWidget(sug_frame)
-
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("background-color: #2a2c3d; max-height: 1px;")
         layout.addWidget(sep)
+
+    def _copy_to_clipboard(self, text: str):
+        """复制文本到剪贴板"""
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText(text)
+        sender = self.sender()
+        if sender:
+            orig = sender.text()
+            sender.setText("✅ 已复制")
+            QTimer.singleShot(1500, lambda: sender.setText(orig))
 
 
 # ========== 综述写作面板 ==========
@@ -364,34 +406,36 @@ class ReviewPanel(QWidget):
         self.result_scroll.setWidget(self.result_container)
         result_layout.addWidget(self.result_scroll, 1)
 
-        # 追问聊天区
+        # 追问聊天区（初始隐藏聊天显示，只展示输入框）
         self.follow_chat_group = QGroupBox("💬 追问与修正")
         self.follow_chat_group.setVisible(False)
         fcl = QVBoxLayout(self.follow_chat_group)
         fcl.setContentsMargins(8, 8, 8, 8)
         fcl.setSpacing(6)
 
-        # 聊天历史显示
+        # 聊天历史显示（初始隐藏，发送第一条消息后才显示，大小可调）
         self.follow_chat_display = QTextEdit()
         self.follow_chat_display.setReadOnly(True)
-        self.follow_chat_display.setMaximumHeight(200)
+        self.follow_chat_display.setMinimumHeight(60)
+        self.follow_chat_display.setVisible(False)
         self.follow_chat_display.setStyleSheet(
             "QTextEdit { background-color: #161720; color: #cfd2e3; border: 1px solid #2a2c3d; "
             "border-radius: 6px; padding: 8px; font-size: 12px; }"
         )
-        fcl.addWidget(self.follow_chat_display)
+        fcl.addWidget(self.follow_chat_display, 1)  # stretch factor 1 使其可拉伸
 
         # 追问输入行
         fcw = QHBoxLayout()
         fcw.setSpacing(6)
         self.follow_chat_input = QTextEdit()
-        self.follow_chat_input.setPlaceholderText("与 AI 讨论修改方案... 如：关于寄生蜂那篇，补充一下 Wolbachia 的部分")
-        self.follow_chat_input.setMaximumHeight(60)
+        self.follow_chat_input.setPlaceholderText("与 AI 讨论修改方案... 按 Ctrl+Enter 发送")
+        self.follow_chat_input.setMaximumHeight(48)
         self.follow_chat_input.setMinimumHeight(36)
         self.follow_chat_input.setStyleSheet(
             "QTextEdit { background-color: #24253a; color: #e2e5f2; border: 1px solid #3b3d54; "
             "border-radius: 6px; padding: 6px 10px; font-size: 13px; }"
         )
+        self.follow_chat_input.installEventFilter(self)  # Ctrl+Enter 快捷键
         fcw.addWidget(self.follow_chat_input, 1)
         self.follow_send_btn = QPushButton("发送")
         self.follow_send_btn.setObjectName("primaryBtn")
@@ -410,6 +454,15 @@ class ReviewPanel(QWidget):
         main_layout.addWidget(splitter, 1)
 
     # ========== 事件处理 ==========
+
+    def eventFilter(self, obj, event):
+        """Ctrl+Enter 发送追问"""
+        from PySide6.QtCore import QEvent
+        if obj == self.follow_chat_input and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Return and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self._on_follow_chat_send()
+                return True
+        return super().eventFilter(obj, event)
 
     def _on_set_zotero(self):
         """设置 Zotero 数据目录 —— 智能识别用户选择的路径"""
@@ -518,8 +571,12 @@ class ReviewPanel(QWidget):
         self._check_worker.start()
 
     def _on_progress(self, message: str, current: int, total: int):
-        self.progress_label.setText(message)
+        self.progress_label.setText(f"⏳ {message}")
+        self.progress_label.setStyleSheet(
+            "color: #e0af68; font-size: 13px; font-weight: bold; padding: 4px 12px;"
+        )
         self.progress_bar.setValue(current)
+        self.progress_bar.setVisible(True)
         if current >= 100:
             self.progress_bar.setVisible(False)
             self.progress_label.setVisible(False)
@@ -629,6 +686,10 @@ class ReviewPanel(QWidget):
 
         if not self._last_result:
             return
+
+        # 首次发送时显示聊天历史区
+        if not self.follow_chat_display.isVisible():
+            self.follow_chat_display.setVisible(True)
 
         # 构建上下文：核查结果摘要 + 对话历史
         context = self._build_follow_context()

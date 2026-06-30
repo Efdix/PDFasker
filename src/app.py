@@ -1,9 +1,8 @@
-"""
-PDFasker 主应用窗口
-"""
+"""PDFasker 主窗口"""
 
+import os
 from PySide6.QtWidgets import (
-    QMainWindow, QSplitter, QMessageBox, QMenuBar, QMenu,
+    QMainWindow, QSplitter, QMessageBox,
     QStatusBar, QLabel, QTabWidget,
 )
 from PySide6.QtCore import Qt, QThread, Signal as QtSignal
@@ -20,14 +19,11 @@ from .core.context_manager import ContextManager
 from .core.zotero_parser import ZoteroLibrary
 from .core.review_checker import ReviewChecker
 from .utils.config import (
-    load_config, add_pdf_to_library,
-    load_chat_history, save_chat_history, delete_chat_history,
+    load_config, load_chat_history, save_chat_history, delete_chat_history,
 )
 
 
 class LLMWorker(QThread):
-    """后台线程：调用 LLM API，避免阻塞 UI"""
-
     chunk_received = QtSignal(str)
     finished = QtSignal()
     error = QtSignal(str)
@@ -47,7 +43,6 @@ class LLMWorker(QThread):
 
 
 class MainWindow(QMainWindow):
-    """PDFasker 主窗口 —— 论文阅读 + 综述写作"""
 
     def __init__(self):
         super().__init__()
@@ -76,8 +71,6 @@ class MainWindow(QMainWindow):
         self._init_review()
 
     def _setup_ui(self):
-        """构建界面布局"""
-        # 菜单栏
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("文件(&F)")
@@ -102,25 +95,17 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(self._on_about)
         help_menu.addAction(about_action)
 
-        # 主布局：使用 QTabWidget 切换「论文阅读」和「综述写作」
+        # 主布局
         self._main_tabs = QTabWidget()
-        self._main_tabs.setStyleSheet(
-            "QTabWidget::pane { border: none; }"
-            "QTabBar::tab { padding: 8px 28px; font-size: 14px; font-weight: bold; "
-            "background: #1a1b26; color: #9599b5; border: none; "
-            "border-bottom: 2px solid transparent; }"
-            "QTabBar::tab:selected { color: #7aa2f7; border-bottom: 2px solid #7aa2f7; }"
-            "QTabBar::tab:hover { color: #cfd2e3; }"
-        )
 
-        # === Tab 0: 论文阅读（原有三栏布局）===
+        # Tab 0: 论文阅读
         outer_splitter = QSplitter(Qt.Orientation.Horizontal)
         outer_splitter.setHandleWidth(3)
-        outer_splitter.setOpaqueResize(False)  # 拖拽时只显示指示线，松手才渲染，减少卡顿
+        outer_splitter.setOpaqueResize(False)
 
-        # 左：PDF 论文库
         self.pdf_list = PDFListPanel()
         self.pdf_list.pdf_selected.connect(self._on_library_pdf_selected)
+        self.pdf_list.pdf_removed.connect(self._on_library_pdf_removed)
 
         # 中：PDF 阅读器 + 右：聊天面板
         inner_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -147,12 +132,12 @@ class MainWindow(QMainWindow):
         outer_splitter.addWidget(self.pdf_list)
         outer_splitter.addWidget(inner_splitter)
         outer_splitter.setSizes([200, 1000])
-        outer_splitter.setStretchFactor(0, 0)  # 论文库不随窗口拉伸
+        outer_splitter.setStretchFactor(0, 0)
         outer_splitter.setStretchFactor(1, 1)
 
         self._main_tabs.addTab(outer_splitter, "📖 论文阅读")
 
-        # === Tab 1: 综述写作 ===
+        # Tab 1: 综述写作
         self._review_panel = ReviewPanel()
         self._main_tabs.addTab(self._review_panel, "📝 综述写作")
 
@@ -166,27 +151,22 @@ class MainWindow(QMainWindow):
         self.status_bar.addPermanentWidget(self._status_model_label)
 
     def _apply_styles(self):
-        """应用全局样式"""
         self.setStyleSheet(STYLESHEET)
 
-    # ========== 事件处理 ==========
+    # ---- 事件处理 ----
 
     def _on_open_pdf(self):
-        """菜单栏或快捷键打开 PDF"""
         self.pdf_viewer._open_pdf()
 
     def _on_pdf_loaded(self, text: str):
-        """PDF 加载完成：初始化上下文 + 加载历史对话"""
-        # 保存旧文档的对话
         if self._current_pdf_path:
             self._save_current_chat()
 
         self._current_pdf_path = self.pdf_viewer.get_current_path()
         self._context_manager.load_pdf_text(text)
 
-        # 加载该文档的历史对话
         history = load_chat_history(self._current_pdf_path)
-        self._context_manager._chat_history = history.copy()
+        self._context_manager.load_history(history)
         # 刷新聊天面板
         self.chat_panel.clear_messages()
         for msg in history:
@@ -203,24 +183,23 @@ class MainWindow(QMainWindow):
         self.chat_panel.set_input_enabled(True)
 
     def _save_current_chat(self):
-        """保存当前文档的对话历史"""
-        if self._current_pdf_path and self._context_manager._chat_history:
-            save_chat_history(self._current_pdf_path, self._context_manager._chat_history)
+        if self._current_pdf_path:
+            save_chat_history(self._current_pdf_path, self._context_manager.get_history())
 
     def _on_pdf_path_changed(self, path: str):
-        """PDF 路径变更时更新标题"""
-        import os
         fname = os.path.basename(path) if path else ""
         self.setWindowTitle(f"PDFasker — {fname}" if fname else "PDFasker — AI 论文解读助手")
 
+    def _on_library_pdf_removed(self, path: str):
+        self.pdf_viewer._reset_view()
+        self.setWindowTitle("PDFasker — AI 论文解读助手")
+
     def _on_library_pdf_selected(self, path: str):
-        """从论文库中选择 PDF —— 先保存旧对话再加载新文档"""
         if path and path != self.pdf_viewer.get_current_path():
             self._save_current_chat()
             self.pdf_viewer.load_pdf(path)
 
     def _on_follow_up_from_reader(self, context: str):
-        """读者在翻译/图析后点击追问 → 直接发送到聊天"""
         if not self._llm_chat:
             QMessageBox.warning(self, "未配置", "请先配置聊天 API")
             return
@@ -237,7 +216,6 @@ class MainWindow(QMainWindow):
         self._llm_worker.start()
 
     def _on_user_message(self, text: str):
-        """用户发送消息"""
         if not self._llm_chat:
             QMessageBox.warning(
                 self, "未配置 API",
@@ -246,7 +224,7 @@ class MainWindow(QMainWindow):
             self.chat_panel.set_input_enabled(True)
             return
 
-        if not self._context_manager._pdf_text:
+        if not self._context_manager.has_pdf:
             QMessageBox.warning(
                 self, "未加载 PDF",
                 "请先打开一个 PDF 文件。"
@@ -263,7 +241,6 @@ class MainWindow(QMainWindow):
 
         # 开始 AI 回复
         self.chat_panel.start_ai_response()
-        self.chat_panel.send_btn.setEnabled(False)
         self.status_bar.showMessage("AI 正在思考...")
 
         # 后台线程调用 API
@@ -274,32 +251,30 @@ class MainWindow(QMainWindow):
         self._llm_worker.start()
 
     def _on_ai_chunk(self, chunk: str):
-        """接收 AI 流式回复的片段"""
         self.chat_panel.append_ai_text(chunk)
 
     def _on_ai_finished(self):
-        """AI 回复完成 —— 收集全文存入历史并保存"""
         ai_text = ""
         if self.chat_panel._current_ai_bubble:
             ai_text = self.chat_panel._current_ai_bubble.get_content()
 
         self._context_manager.add_to_history("assistant", ai_text)
         self.chat_panel.finish_ai_response()
-        # 实时保存对话历史
+        self.chat_panel.set_token_count(self._context_manager.estimate_tokens(
+            self._context_manager.get_full_context_for_estimation()
+        ))
         if self._current_pdf_path:
-            save_chat_history(self._current_pdf_path, self._context_manager._chat_history)
+            save_chat_history(self._current_pdf_path, self._context_manager.get_history())
         self.status_bar.showMessage("就绪")
         self._llm_worker = None
 
     def _on_ai_error(self, error_msg: str):
-        """AI 调用出错"""
         self.chat_panel.append_ai_text(f"\n\n❌ 错误：{error_msg}")
         self.chat_panel.finish_ai_response()
         self.status_bar.showMessage(f"错误：{error_msg}")
         self._llm_worker = None
 
     def _on_clear_chat(self):
-        """清空对话历史（内存 + 磁盘）"""
         self._context_manager.clear_history()
         self.chat_panel.clear_messages()
         if self._current_pdf_path:
@@ -317,19 +292,20 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self, "关于 PDFasker",
             "<h3>PDFasker</h3>"
-            "<p>AI 论文解读助手 v3.0</p>"
-            "<p>支持 DeepSeek V4、MiniMax 及所有 OpenAI 兼容接口。</p>"
-            "<p>三套 API 独立配置：聊天 / 翻译 / 图析</p>"
-            "<p>🆕 综述写作辅助：Zotero 文献库集成 + AI 对照原文优化综述</p>"
+            "<p>AI 论文解读助手 v1.0</p>"
+            "<p>支持 DeepSeek V4、Mimo 及所有 OpenAI 兼容接口。</p>"
+            "<p>五套 API 独立配置：聊天 / 翻译 / 图析 / 综述写作 / 排版</p>"
+            "<p>🆕 论文 AI 排版 · 段落合并 · Zotero 文献库集成</p>"
         )
 
     def closeEvent(self, event):
-        """关闭窗口时保存对话"""
         self._save_current_chat()
+        self.pdf_viewer.save_state_now()
         super().closeEvent(event)
 
+    # ---- API 客户端 ----
+
     def _init_all_clients(self):
-        """初始化三套 LLM 客户端"""
         from .utils.config import get_api_config
 
         def _make_client(key: str) -> LLMClient | None:
@@ -345,19 +321,23 @@ class MainWindow(QMainWindow):
         self._llm_trans = _make_client("translation_api")
         self._llm_image = _make_client("image_api")
         self._llm_review = _make_client("review_api")
+        self._llm_format = _make_client("format_api") or self._llm_trans  # fallback 到翻译
 
         # 注入到子面板
         self.pdf_viewer.set_translation_client(self._llm_trans)
         self.pdf_viewer.set_image_client(self._llm_image)
+        self.pdf_viewer.set_format_client(self._llm_format)
 
         # 更新综述检查器
         self._init_review()
 
-        # 状态栏
+        # 状态栏（顺序：排版 → 翻译 → 图析 → 聊天 → 综述）
         parts = []
-        if self._llm_chat: parts.append(f"聊天:{self._llm_chat.model}")
+        if self._llm_format:
+            parts.append(f"排版:{self._llm_format.model}")
         if self._llm_trans: parts.append(f"翻译:{self._llm_trans.model}")
         if self._llm_image: parts.append(f"图析:{self._llm_image.model}")
+        if self._llm_chat: parts.append(f"聊天:{self._llm_chat.model}")
         if self._llm_review: parts.append(f"综述:{self._llm_review.model}")
         if parts:
             self._status_model_label.setText(" | ".join(parts))
@@ -367,8 +347,6 @@ class MainWindow(QMainWindow):
             self._status_model_label.setStyleSheet("color: #e0af68; padding: 2px 8px;")
 
     def _init_review(self):
-        """初始化综述写作相关的 Zotero 库和检查器"""
-        # Zotero 文献库
         zotero_path = self._config.get("zotero_data_dir", "")
         self._zotero = ZoteroLibrary(zotero_path)
 

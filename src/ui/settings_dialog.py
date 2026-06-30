@@ -1,5 +1,5 @@
 """
-API 配置对话框 —— 聊天 / 翻译 / 图片解析 三套 API 独立配置
+API 配置对话框 —— 排版 / 翻译 / 图析 / 聊天 / 综述写作 五套 API 独立配置
 """
 
 from PySide6.QtWidgets import (
@@ -60,19 +60,27 @@ class APIConfigTab(QWidget):
         info = PROVIDERS.get(name, {})
         self.provider_desc.setText(info.get("description", ""))
         self.base_url.setText(info.get("base_url", ""))
+        models = info.get("models", [])
         self.model.clear()
-        for m in info.get("models", []):
-            self.model.addItem(m)
-        if self.model.count() > 0:
+        if models:
+            self.model.addItems(models)
             self.model.setCurrentIndex(0)
+        else:
+            self.model.setCurrentText("")
 
     def load(self, api_cfg: dict):
         p = api_cfg.get("provider", "DeepSeek")
         idx = self.provider_combo.findText(p)
         if idx >= 0:
             self.provider_combo.setCurrentIndex(idx)
+            # _on_provider 已触发，模型列表已填充
+        else:
+            self.provider_combo.setCurrentIndex(0)
         self.api_key.setText(api_cfg.get("api_key", ""))
-        self.base_url.setText(api_cfg.get("base_url", ""))
+        # base_url 优先用已保存的，否则用 provider 默认值
+        saved_url = api_cfg.get("base_url", "")
+        if saved_url:
+            self.base_url.setText(saved_url)
         m = api_cfg.get("model", "")
         if m:
             idx = self.model.findText(m)
@@ -91,12 +99,12 @@ class APIConfigTab(QWidget):
 
 
 class SettingsDialog(QDialog):
-    """三标签页 API 配置对话框"""
+    """API 配置对话框（五标签页）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("API 配置")
-        self.setMinimumSize(520, 500)
+        self.setMinimumSize(680, 520)
         self.setModal(True)
         self._config = load_config()
         self._setup_ui()
@@ -111,14 +119,20 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
 
         self.tabs = QTabWidget()
-        self._chat_tab = APIConfigTab("chat", "💬 聊天 API — 基于论文内容的问答对话，建议用最强模型")
+        # 顺序：排版 → 翻译 → 图析 → 聊天 → 综述写作
+        self._format_tab = APIConfigTab("format", "🔤 排版 API — 整理 PDF 提取文本的换行和格式，轻量任务可用便宜模型")
         self._trans_tab = APIConfigTab("trans", "🌐 翻译 API — 英文段落翻译，可用便宜模型")
-        self._image_tab = APIConfigTab("image", "🖼️ 图析 API — 解读图表（需多模态模型，如 GPT-4o / Gemini）")
+        self._image_tab = APIConfigTab("image", "🖼️ 图析 API — 解读图表（需多模态模型）")
+        self._chat_tab = APIConfigTab("chat", "💬 聊天 API — 基于论文内容的问答对话，建议用最强模型")
         self._review_tab = APIConfigTab("review", "📝 综述写作 API — 对照真实文献优化综述内容，分析深度高需强推理模型")
-        self.tabs.addTab(self._chat_tab, "💬 聊天")
+        self.tabs.addTab(self._format_tab, "🔤 排版")
         self.tabs.addTab(self._trans_tab, "🌐 翻译")
         self.tabs.addTab(self._image_tab, "🖼️ 图析")
-        self.tabs.addTab(self._review_tab, "📝 综述核查")
+        self.tabs.addTab(self._chat_tab, "💬 聊天")
+        self.tabs.addTab(self._review_tab, "📝 综述写作")
+        self.tabs.addTab(self._image_tab, "🖼️ 图析")
+        self.tabs.addTab(self._review_tab, "📝 综述写作")
+        self.tabs.addTab(self._format_tab, "🔤 排版")
         layout.addWidget(self.tabs)
 
         btn = QHBoxLayout()
@@ -137,12 +151,13 @@ class SettingsDialog(QDialog):
 
     def _current_tab(self) -> APIConfigTab:
         idx = self.tabs.currentIndex()
-        return [self._chat_tab, self._trans_tab, self._image_tab, self._review_tab][idx]
+        return [self._format_tab, self._trans_tab, self._image_tab, self._chat_tab, self._review_tab][idx]
 
     def _load(self):
-        self._chat_tab.load(get_api_config(self._config, "chat_api"))
+        self._format_tab.load(get_api_config(self._config, "format_api"))
         self._trans_tab.load(get_api_config(self._config, "translation_api"))
         self._image_tab.load(get_api_config(self._config, "image_api"))
+        self._chat_tab.load(get_api_config(self._config, "chat_api"))
         self._review_tab.load(get_api_config(self._config, "review_api"))
 
     def _test(self):
@@ -160,18 +175,20 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(self, "失败", str(e))
 
     def _save(self):
-        ck_api = self._chat_tab.get()
+        fm_api = self._format_tab.get()
         tr_api = self._trans_tab.get()
         im_api = self._image_tab.get()
+        ck_api = self._chat_tab.get()
         rv_api = self._review_tab.get()
-        for api, name in [(ck_api, "聊天"), (tr_api, "翻译"), (im_api, "图析"), (rv_api, "综述核查")]:
+        for api, name in [(fm_api, "排版"), (tr_api, "翻译"), (im_api, "图析"), (ck_api, "聊天"), (rv_api, "综述写作")]:
             if not api["api_key"]:
                 QMessageBox.warning(self, "提示", f"请填写{name} API 的 Key")
                 return
 
-        self._config["chat_api"] = ck_api
+        self._config["format_api"] = fm_api
         self._config["translation_api"] = tr_api
         self._config["image_api"] = im_api
+        self._config["chat_api"] = ck_api
         self._config["review_api"] = rv_api
         save_config(self._config)
         self.accept()

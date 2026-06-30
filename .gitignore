@@ -10,30 +10,21 @@ build/
 venv/
 env/
 .conda/
-
-# IDE
-.vscode/
-.idea/
-
-# 项目运行时数据
-.pdfasker/
-
-# 系统文件
-.DS_Store
-Thumbs.db
 .venv/
 
 # IDE
 .vscode/
 .idea/
 
-# 系统文件
-.DS_Store
-Thumbs.db
-
-# 配置文件（含 API Key，不要提交！）
+# 项目运行时数据（含 API Key 配置，切勿提交！）
+.pdfasker/
 .env
 *.secret
 
-# 打包输出
-*.spec
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 图片缓存
+*_cache/

@@ -93,23 +93,37 @@ class ReviewChecker:
 **建议改写的版本**：[给出一个改写后的段落示例，保持学术风格，字数与原文相当。如果原文已经很好，写"原文已较好，无需大幅修改"即可]
 **关键词提示**：[列出原文中的 3-5 个关键技术术语/概念，作者可考虑在综述中使用]"""
 
-    # 整体修改建议
-    OVERALL_PROMPT = """你是一位资深学术写作导师。请对以下综述草稿及其引文分析结果，给出整体的修改建议。
+    # 整体修改与改写
+    OVERALL_PROMPT = """你是一位学术论文润色专家。请对以下综述草稿进行整体改写和优化。
 
 【综述全文】
 {review_text}
 
-【各引文分析汇总】
+【各引文逐条分析汇总】
 {verification_summary}
 
-请从以下几方面给出具体、可操作的建议：
-1. **文献覆盖**：引用的文献是否足够？有哪些重要的研究空白需要补充？
-2. **论证逻辑**：综述的叙事线是否清晰？段落之间是否需要更好的衔接？
-3. **批判性深度**：目前是罗列文献还是有批判性综合？如何加强"对话感"？
-4. **写作表达**：语言是否精炼？是否有更好的学术表达方式？
-5. **结构建议**：如果重新组织这篇综述，你会建议怎样的结构？
+## 改写要求
 
-请用中文给出温暖但专业的建议，像导师改论文一样，控制在 600 字以内。"""
+### 1. 语言风格
+- 专业、简练、平实、客观，避免夸张和口语化表达
+- 使用学术论文的标准行文方式，术语准确、句式严谨
+- 删除冗余表述，但保留必要的限定词（如"可能""在大多数情况下"等体现学术严谨性的措辞）
+
+### 2. 引用核查与补充
+- 每条分析中标记为「建议补充」「表述可优化」的引用声明，对照原文反馈修正表述
+- 标记为「文献未匹配」的，如所述内容为学术界共识可保留，否则标注为待核实
+- 根据综述涉及的研究主题，判断现有引用是否覆盖了关键文献；如发现明显遗漏的重要研究方向或经典文献，在文末以注释形式列出建议补充的文献（格式：作者, 年份, 标题关键词, 建议引用理由, 一句话）
+
+### 3. 过渡与衔接
+- 检查句子之间的逻辑关系，必要时添加连接词或过渡句
+- 确保段落之间有清晰的逻辑推进（如：问题→方法→进展→不足→展望）
+- 小节之间如有跳跃，补写 1-2 句承上启下的过渡语句
+
+## 输出格式
+
+请直接输出改写后的完整综述全文，不要输出修改说明或评价。字数与原文大致相当或略增。
+
+在改写稿末尾，另起一行用 `---` 分隔，然后以列表形式给出「建议补充引用」和「主要修改说明」（各不超过 5 条，每条一句话）。"""
 
     def __init__(self, llm_client: LLMClient, zotero_lib: ZoteroLibrary):
         self._llm = llm_client
@@ -362,7 +376,7 @@ class ReviewChecker:
         return "\n\n".join(result_parts)
 
     def _generate_overall(self, review_text: str, claims: list[CitationClaim]) -> str:
-        """生成整体修改建议"""
+        """生成整体改写稿"""
         summary_parts = []
         for claim in claims:
             icon = {
@@ -370,19 +384,35 @@ class ReviewChecker:
                 "需核实": "⚠️", "文献未匹配": "❓"
             }.get(claim.status, "❓")
             matched_title = claim.matched_item.title[:60] if claim.matched_item else "未匹配"
+            # 截取 AI 反馈中关键部分（诊断 + 可补充内容）
+            feedback_brief = claim.ai_feedback
+            if len(feedback_brief) > 300:
+                # 尝试取诊断行
+                diag_match = re.search(r'\*\*诊断\*\*[：:]\s*(.+?)(?:\n|$)', feedback_brief)
+                feedback_brief = (diag_match.group(1) if diag_match else feedback_brief[:300]) + "..."
             summary_parts.append(
                 f"{icon} [{claim.status}] {claim.citation_marker} → {matched_title}\n"
-                f"   综述原文：{claim.claim_text[:150]}...\n"
-                f"   AI 反馈：{claim.ai_feedback[:200]}...\n"
+                f"   综述原文：{claim.claim_text[:200]}...\n"
+                f"   诊断：{feedback_brief}\n"
             )
 
         verification_summary = "\n".join(summary_parts)
 
+        # 计算 token 预算：综述全文 + 分析汇总，保留足够空间给改写输出
+        review_chars = len(review_text)
+        summary_chars = len(verification_summary)
+        # 如果原文较长，适当截断分析汇总以留空间给改写输出
+        max_input = 12000  # 输入总字符上限
+        if review_chars + summary_chars > max_input:
+            budget_for_summary = max(2000, max_input - review_chars)
+            if len(verification_summary) > budget_for_summary:
+                verification_summary = verification_summary[:budget_for_summary] + "\n...(汇总已截断)"
+
         try:
             response = self._llm.chat_sync([
                 {"role": "user", "content": self.OVERALL_PROMPT.format(
-                    review_text=review_text[:6000],
-                    verification_summary=verification_summary[:4000],
+                    review_text=review_text,
+                    verification_summary=verification_summary,
                 )}
             ])
             return response

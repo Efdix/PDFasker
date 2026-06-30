@@ -61,13 +61,13 @@ class PDFListPanel(QWidget):
         action_bar.setContentsMargins(8, 4, 8, 4)
         action_bar.setSpacing(4)
 
-        self.import_btn = QPushButton("+ 导入 PDF")
+        self.import_btn = QPushButton("📥 导入")
+        self.import_btn.setToolTip("导入 PDF 论文到图书馆")
         self.import_btn.clicked.connect(self._import_pdf)
         action_bar.addWidget(self.import_btn)
 
-        self.lib_path_btn = QPushButton("...")
+        self.lib_path_btn = QPushButton("📂 路径")
         self.lib_path_btn.setToolTip("设置图书馆存储路径")
-        self.lib_path_btn.setFixedWidth(32)
         self.lib_path_btn.clicked.connect(self._set_library_path)
         action_bar.addWidget(self.lib_path_btn)
 
@@ -257,8 +257,11 @@ class PDFListPanel(QWidget):
         self._refresh()
 
     def _remove_pdf(self, path: str):
-        r = QMessageBox.question(self, "确认", "从论文库中移除此 PDF？\n（不删除文件）")
+        r = QMessageBox.question(self, "确认", "从论文库中移除此 PDF？\n（不删除原文件，但会清除关联的对话和排版记录）")
         if r == QMessageBox.StandardButton.Yes:
+            from ..utils.config import delete_chat_history, delete_doc_state
+            delete_chat_history(path)
+            delete_doc_state(path)
             remove_pdf_from_library(path)
             self.pdf_removed.emit(path)
             self._refresh()

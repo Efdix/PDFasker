@@ -1,74 +1,62 @@
-"""
-上下文管理器 —— 管理长文本的分块与对话上下文
-"""
+"""上下文管理器 —— 长文本分块与对话上下文，token 超限时自动截断"""
 
 
 class ContextManager:
-    """管理 PDF 文本和对话上下文，在 token 超限时自动截断"""
+    """管理 PDF 文本和对话上下文"""
 
-    # 粗略估算：中文约 1.5 字符/token，英文约 4 字符/token
-    # 取保守值：2 字符/token
-    CHARS_PER_TOKEN = 2
+    CHARS_PER_TOKEN = 2  # 保守估算：2 字符 ≈ 1 token
 
     def __init__(self, max_tokens: int = 1_000_000):
-        """
-        参数:
-            max_tokens: 模型最大上下文窗口（DeepSeek V4 支持 1M）
-        """
         self.max_tokens = max_tokens
-        self.max_chars = max_tokens * self.CHARS_PER_TOKEN
         self._pdf_text: str = ""
         self._chat_history: list[dict] = []
 
+    # ---- 公共 API ----
+
     def load_pdf_text(self, text: str):
-        """加载 PDF 全文"""
         self._pdf_text = text
         self._chat_history = []
 
+    def load_history(self, history: list[dict]):
+        self._chat_history = history.copy()
+
+    def get_history(self) -> list[dict]:
+        return self._chat_history
+
+    @property
+    def has_pdf(self) -> bool:
+        return bool(self._pdf_text)
+
+    def get_full_context_for_estimation(self) -> str:
+        return self._pdf_text + "".join(m["content"] for m in self._chat_history)
+
     def estimate_tokens(self, text: str) -> int:
-        """粗略估算 token 数"""
         return len(text) // self.CHARS_PER_TOKEN
 
+    def add_to_history(self, role: str, content: str):
+        self._chat_history.append({"role": role, "content": content})
+
+    def clear_history(self):
+        self._chat_history = []
+
     def build_messages(self, user_query: str) -> list[dict]:
-        """
-        构建发送给 LLM 的完整消息列表。
-        自动根据 token 预算截断上下文。
-        """
+        """构建发送给 LLM 的完整消息列表，按 token 预算自动截断"""
         system_prompt = self._build_system_prompt()
         messages = [{"role": "system", "content": system_prompt}]
 
-        # 计算已有消息的 token 占用
         used_tokens = self.estimate_tokens(system_prompt) + self.estimate_tokens(user_query)
+        budget_tokens = self.max_tokens - used_tokens - 4000  # 预留回复空间
 
-        # 预留回复空间（约 4000 tokens）
-        budget_tokens = self.max_tokens - used_tokens - 4000
-
-        # 截取 PDF 文本
         pdf_section = self._truncate_text(self._pdf_text, budget_tokens)
         messages.append({"role": "user", "content": pdf_section})
 
-        # 添加最近对话历史
         history_budget = budget_tokens - self.estimate_tokens(pdf_section)
-        recent_history = self._get_recent_history(history_budget)
-        messages.extend(recent_history)
-
-        # 添加当前问题
+        messages.extend(self._get_recent_history(history_budget))
         messages.append({"role": "user", "content": user_query})
 
         return messages
 
-    def add_to_history(self, role: str, content: str):
-        """添加一条消息到历史记录"""
-        self._chat_history.append({"role": role, "content": content})
-
-    def clear_history(self):
-        """清除对话历史（保留 PDF 文本）"""
-        self._chat_history = []
-
-    def reset(self):
-        """完全重置"""
-        self._pdf_text = ""
-        self._chat_history = []
+    # ---- 内部 ----
 
     def _build_system_prompt(self) -> str:
         return (
@@ -82,25 +70,20 @@ class ContextManager:
         )
 
     def _truncate_text(self, text: str, token_budget: int) -> str:
-        """按 token 预算截断文本（保留开头和结尾）"""
         char_budget = token_budget * self.CHARS_PER_TOKEN
         if len(text) <= char_budget:
             return text
-
-        # 保留前 70% + 后 30%
         head_size = int(char_budget * 0.7)
         tail_size = int(char_budget * 0.3)
         return (
             text[:head_size]
-            + f"\n\n...（中间部分已省略以适配上下文窗口，共省略约 {len(text) - head_size - tail_size} 字符）...\n\n"
+            + f"\n\n...（中间部分已省略，约 {len(text) - head_size - tail_size} 字符）...\n\n"
             + text[-tail_size:]
         )
 
     def _get_recent_history(self, token_budget: int) -> list[dict]:
-        """获取最近的对话历史，控制在 token 预算内"""
         if not self._chat_history:
             return []
-
         result = []
         used = 0
         for msg in reversed(self._chat_history):

@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
     "translation_api": _default_api("DeepSeek", "deepseek-v4-flash"),
     "image_api":       _default_api("DeepSeek", "deepseek-v4-flash"),
     "review_api":      _default_api("DeepSeek", "deepseek-v4-flash"),
+    "format_api":      _default_api("DeepSeek", "deepseek-v4-flash"),
     "max_tokens": 1_000_000,
     "library_path": str(_DEFAULT_LIBRARY),
     "zotero_data_dir": "",   # Zotero 数据目录（用户手动设置）
@@ -75,6 +76,9 @@ def load_config() -> dict:
             }
             saved["translation_api"] = saved["chat_api"].copy()
             saved["image_api"] = saved["chat_api"].copy()
+        # 兼容无 format_api
+        if "format_api" not in saved:
+            saved["format_api"] = saved.get("translation_api", _default_api()).copy()
         config.update(saved)
         return config
     return DEFAULT_CONFIG.copy()
@@ -174,3 +178,37 @@ def get_image_cache_dir() -> Path:
     d = _resolve_data_dir(config) / "image_cache"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# ========== 排版 & 翻译状态持久化（按文档隔离）==========
+
+def _states_dir(config: dict = None) -> Path:
+    if config is None:
+        config = load_config()
+    d = _resolve_data_dir(config) / "states"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def load_doc_state(file_path: str) -> dict:
+    """加载某篇文档的排版/翻译状态"""
+    f = _states_dir() / f"{_doc_id(file_path)}.json"
+    if f.exists():
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_doc_state(file_path: str, state: dict):
+    """保存某篇文档的排版/翻译状态"""
+    f = _states_dir() / f"{_doc_id(file_path)}.json"
+    f.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def delete_doc_state(file_path: str):
+    """删除某篇文档的排版/翻译状态"""
+    f = _states_dir() / f"{_doc_id(file_path)}.json"
+    if f.exists():
+        f.unlink()

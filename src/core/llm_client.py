@@ -1,14 +1,11 @@
-"""
-LLM API 客户端 —— 支持所有 OpenAI 兼容接口
-（DeepSeek V4、MiniMax、通义千问、智谱 等）
-"""
+"""LLM API 客户端 —— OpenAI 兼容接口"""
 
 from openai import OpenAI
 from typing import Generator
 
 
 class LLMClient:
-    """统一的 LLM API 客户端，支持 OpenAI 兼容接口"""
+    """统一的 LLM API 客户端"""
 
     def __init__(self, api_key: str, base_url: str, model: str):
         self.api_key = api_key
@@ -17,10 +14,7 @@ class LLMClient:
         self._client = OpenAI(api_key=api_key, base_url=base_url)
 
     def chat_stream(self, messages: list[dict]) -> Generator[str, None, None]:
-        """
-        流式对话 —— 返回生成器，逐块 yield 文本。
-        自动跳过 DeepSeek V4 的 reasoning_content（思考过程）。
-        """
+        """流式对话，自动跳过 reasoning_content"""
         response = self._client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -33,10 +27,7 @@ class LLMClient:
                 yield delta.content
 
     def chat_sync(self, messages: list[dict]) -> str:
-        """
-        同步对话 —— 一次性返回完整回复字符串。
-        用于测试连接、翻译等不需要流式的场景。
-        """
+        """同步对话"""
         response = self._client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -46,7 +37,6 @@ class LLMClient:
         return response.choices[0].message.content
 
 
-# 预设的 API 提供商配置
 PROVIDERS = {
     "DeepSeek": {
         "base_url": "https://api.deepseek.com",

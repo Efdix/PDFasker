@@ -46,7 +46,7 @@ class ChatBubble(QFrame):
         content_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.2)
         content_label.setFont(content_font)
         content_label.setStyleSheet(
-            "color: #e2e5f2; line-height: 1.7; padding: 4px 0;"
+            "color: #e2e5f2; line-height: 1.8; padding: 4px 0; font-size: 13px;"
         )
         layout.addWidget(content_label)
         self._content_label = content_label  # 保存引用，方便流式更新
@@ -56,11 +56,6 @@ class ChatBubble(QFrame):
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("background-color: #2a2c3d; max-height: 1px; margin-top: 4px;")
         layout.addWidget(sep)
-
-    def update_content(self, content: str):
-        """更新气泡内容（用于流式输出）"""
-        if self._content_label:
-            self._content_label.setText(content)
 
     def get_content(self) -> str:
         """获取当前文本内容"""
@@ -99,6 +94,15 @@ class ChatPanel(QWidget):
 
         toolbar.addStretch()
 
+        self.token_label = QLabel("")
+        self.token_label.setStyleSheet("color: #8a8ea6; font-size: 11px; padding: 0 8px;")
+        toolbar.addWidget(self.token_label)
+
+        export_btn = QPushButton("💾 导出")
+        export_btn.setToolTip("导出对话为 Markdown 文件")
+        export_btn.clicked.connect(self._on_export)
+        toolbar.addWidget(export_btn)
+
         clear_btn = QPushButton("清空对话")
         clear_btn.clicked.connect(self._on_clear)
         toolbar.addWidget(clear_btn)
@@ -133,7 +137,7 @@ class ChatPanel(QWidget):
             "📌 请先在设置中配置 API Key"
         )
         welcome.setWordWrap(True)
-        welcome.setStyleSheet("color: #9599b5; padding: 24px; font-size: 13px;")
+        welcome.setStyleSheet("color: #8a8ea6; padding: 24px; font-size: 13px; line-height: 1.8;")
         self.msg_layout.insertWidget(0, welcome)
 
         self.scroll_area.setWidget(self.msg_container)
@@ -179,7 +183,6 @@ class ChatPanel(QWidget):
         if not text:
             return
         self.input_box.clear()
-        self.send_btn.setEnabled(False)
         self.send_message.emit(text)
 
     def _on_clear(self):
@@ -193,6 +196,7 @@ class ChatPanel(QWidget):
 
     def start_ai_response(self):
         """开始 AI 回复（创建空气泡用于流式填充）"""
+        self.send_btn.setEnabled(False)
         bubble = ChatBubble("assistant", "")
         self._insert_bubble(bubble)
         self._current_ai_bubble = bubble
@@ -241,3 +245,36 @@ class ChatPanel(QWidget):
         QTimer.singleShot(50, lambda: self.scroll_area.verticalScrollBar().setValue(
             self.scroll_area.verticalScrollBar().maximum()
         ))
+
+    def _on_export(self):
+        """导出对话为 Markdown 文件"""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        import datetime
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出对话", f"PDFasker_chat_{datetime.date.today()}.md", "Markdown (*.md)"
+        )
+        if not path:
+            return
+        lines = ["# PDFasker 对话记录\n", f"导出时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n---\n"]
+        for bubble in self._bubbles:
+            role = "🤖 AI" if bubble.role == "assistant" else "👤 用户"
+            content = bubble.get_content()
+            lines.append(f"### {role}\n\n{content}\n\n---\n")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            QMessageBox.information(self, "导出成功", f"对话已导出到：\n{path}")
+        except OSError as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+
+    def set_token_count(self, count: int):
+        """更新 Token 估算显示"""
+        if count > 0:
+            if count >= 1_000_000:
+                self.token_label.setText(f"🔢 {count/1_000_000:.1f}M tokens")
+            elif count >= 1_000:
+                self.token_label.setText(f"🔢 {count/1_000:.0f}K tokens")
+            else:
+                self.token_label.setText(f"🔢 {count} tokens")
+        else:
+            self.token_label.setText("")
