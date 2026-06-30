@@ -212,3 +212,50 @@ def delete_doc_state(file_path: str):
     f = _states_dir() / f"{_doc_id(file_path)}.json"
     if f.exists():
         f.unlink()
+
+
+# ========== 段落缓存（避免重复解析） ==========
+
+def _cache_dir() -> Path:
+    config = load_config()
+    d = _resolve_data_dir(config) / "para_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def load_paragraph_cache(file_path: str) -> list[dict] | None:
+    """加载段落缓存，若 PDF 修改时间不匹配则返回 None。
+    返回 (paragraphs, full_text) 元组，失败返回 None。"""
+    f = _cache_dir() / f"{_doc_id(file_path)}.json"
+    if not f.exists():
+        return None
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        cached_mtime = data.get("_mtime", 0)
+        real_mtime = os.path.getmtime(file_path)
+        if abs(cached_mtime - real_mtime) > 1.0:
+            return None
+        paras = data.get("paragraphs", [])
+        for p in paras:
+            if "bbox" in p and isinstance(p["bbox"], list):
+                p["bbox"] = tuple(p["bbox"])
+        full_text = data.get("full_text", "")
+        return (paras, full_text)
+    except (json.JSONDecodeError, OSError, KeyError):
+        return None
+
+
+def save_paragraph_cache(file_path: str, paragraphs: list[dict], full_text: str = ""):
+    f = _cache_dir() / f"{_doc_id(file_path)}.json"
+    clean = []
+    for p in paragraphs:
+        cp = dict(p)
+        if "bbox" in cp and isinstance(cp["bbox"], tuple):
+            cp["bbox"] = list(cp["bbox"])
+        clean.append(cp)
+    data = {
+        "_mtime": os.path.getmtime(file_path),
+        "paragraphs": clean,
+        "full_text": full_text,
+    }
+    f.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

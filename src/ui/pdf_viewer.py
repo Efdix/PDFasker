@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QLabel, QFrame, QFileDialog, QTextEdit, QSizePolicy,
     QCheckBox, QApplication, QLineEdit, QMenu, QInputDialog,
 )
-from PySide6.QtCore import Qt, Signal, QThread, QTimer, QEvent
+from PySide6.QtCore import Qt, Signal, QThread, QTimer, QEvent, QSize
 from PySide6.QtGui import QFont, QPixmap, QTextDocument
 
 # ---- 常量 ----
@@ -193,7 +193,53 @@ def _highlight_keywords(text: str) -> str:
             r'\1\2<b><span style="font-size:16px; color:#7aa2f7;">\3</span></b>\4',
             text, flags=re.IGNORECASE
         )
-    return text.replace("\n", "<br>")
+    text = text.replace("\n", "<br>")
+    return f'<div style="white-space: normal; word-wrap: break-word; overflow-wrap: break-word;">{text}</div>'
+
+
+# ---- 通用高度计算辅助函数 ----
+def _calc_layout_height(layout, inner_w: int) -> int:
+    """递归计算布局在给定宽度下所需的高度。
+    对 QVBoxLayout 累加子元素高度；对 QHBoxLayout 取最大子元素高度。
+    自动处理嵌套的 widget-with-layout 情况。"""
+    if layout is None:
+        return 0
+    from PySide6.QtWidgets import QHBoxLayout
+    is_horizontal = isinstance(layout, QHBoxLayout)
+    spacing = layout.spacing()
+    total = 0
+    max_h = 0
+    count = layout.count()
+    for i in range(count):
+        item = layout.itemAt(i)
+        if item is None:
+            continue
+        child_h = 0
+        if widget := item.widget():
+            if not widget.isVisible():
+                continue
+            if widget.hasHeightForWidth():
+                child_h = widget.heightForWidth(inner_w)
+            elif widget.layout():
+                w_marg = widget.contentsMargins()
+                w_inner = max(inner_w - w_marg.left() - w_marg.right(), 50)
+                child_h = w_marg.top() + w_marg.bottom() + _calc_layout_height(widget.layout(), w_inner)
+            else:
+                child_h = widget.sizeHint().height()
+        elif sub := item.layout():
+            sub_marg = sub.contentsMargins()
+            sub_inner = max(inner_w - sub_marg.left() - sub_marg.right(), 50)
+            child_h = sub_marg.top() + sub_marg.bottom() + _calc_layout_height(sub, sub_inner)
+        elif item.spacerItem():
+            continue
+        if is_horizontal:
+            max_h = max(max_h, child_h)
+        else:
+            if child_h > 0:
+                total += child_h
+                if i < count - 1:
+                    total += spacing
+    return max_h if is_horizontal else total
 
 
 class ParagraphCard(QFrame):
@@ -209,6 +255,24 @@ class ParagraphCard(QFrame):
         self._translated = False
         self._selected = False
         self._setup_ui()
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        """根据给定宽度计算所需高度，使文字折行后卡片能正确撑高"""
+        marg = self.contentsMargins()
+        inner_w = max(w - marg.left() - marg.right(), 50)
+        lay = self.layout()
+        if lay is None:
+            return 40
+        h = marg.top() + marg.bottom() + _calc_layout_height(lay, inner_w)
+        return max(h, 40)
+
+    def sizeHint(self):
+        """确保 sizeHint 与 heightForWidth 一致"""
+        base = super().sizeHint()
+        return QSize(base.width(), self.heightForWidth(base.width()))
 
     def _detect_en(self, text: str) -> bool:
         if not text: return False
@@ -259,6 +323,7 @@ class ParagraphCard(QFrame):
                 "background-color: transparent;"
             )
         self.text_label.setWordWrap(True)
+        self.text_label.setMinimumWidth(0)
         self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.text_label.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
@@ -321,21 +386,21 @@ class ParagraphCard(QFrame):
 
     def show_translation(self, zh: str, defer_layout: bool = True):
         self._translated = True; self._trans_text = zh
-        self.zh_label.setText(zh); self.zh_label.setVisible(True)
+        if hasattr(self, 'zh_label'):
+            self.zh_label.setText(zh); self.zh_label.setVisible(True)
         if hasattr(self, 'trans_btn'):
             self.trans_btn.setVisible(False)
         if hasattr(self, 're_trans_btn'):
             self.re_trans_btn.setVisible(True)
         if hasattr(self, 're_format_btn'):
             self.re_format_btn.setVisible(True)
-        if defer_layout:
+        if defer_layout and hasattr(self, 'zh_label'):
             QTimer.singleShot(0, self._adjust_card_size)
 
     def _adjust_card_size(self):
-        """强制卡片重新计算自身尺寸"""
-        self.zh_label.updateGeometry()
+        if hasattr(self, 'zh_label'):
+            self.zh_label.updateGeometry()
         self.updateGeometry()
-        self.adjustSize()
 
     def show_error(self, err: str):
         self.trans_btn.setText("❌ 失败"); self.trans_btn.setEnabled(True); self.trans_btn.setToolTip(err)
@@ -446,11 +511,33 @@ class ImageCard(QFrame):
     def __init__(self, image_path: str, page: int, parent=None):
         super().__init__(parent)
         self._image_path = image_path
+        self._page = page
         self._explained = False
         self._selected = False
         self.setStyleSheet(
             "ImageCard { background-color: #1a1b26; border: 1px solid #2a2c3d; border-radius: 10px; margin: 6px 12px; }"
         )
+        self._setup_ui()
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        """根据给定宽度计算所需高度"""
+        marg = self.contentsMargins()
+        inner_w = max(w - marg.left() - marg.right(), 50)
+        lay = self.layout()
+        if lay is None:
+            return 40
+        h = marg.top() + marg.bottom() + _calc_layout_height(lay, inner_w)
+        return max(h, 40)
+
+    def sizeHint(self):
+        """确保 sizeHint 与 heightForWidth 一致"""
+        base = super().sizeHint()
+        return QSize(base.width(), self.heightForWidth(base.width()))
+
+    def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 12); layout.setSpacing(8)
 
@@ -461,13 +548,13 @@ class ImageCard(QFrame):
         self._checkbox.stateChanged.connect(self._on_select_changed)
         layout.addWidget(self._checkbox)
 
-        page_label = QLabel(f"📷 第 {page} 页插图")
+        page_label = QLabel(f"📷 第 {self._page} 页插图")
         page_label.setStyleSheet("color: #9599b5; font-size: 11px;")
         page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(page_label)
 
-        if image_path and os.path.exists(image_path):
-            pixmap = QPixmap(image_path)
+        if self._image_path and os.path.exists(self._image_path):
+            pixmap = QPixmap(self._image_path)
             if not pixmap.isNull():
                 if pixmap.width() > 500:
                     pixmap = pixmap.scaledToWidth(500, Qt.TransformationMode.SmoothTransformation)
@@ -562,6 +649,8 @@ class PDFViewerPanel(QWidget):
         self._search_index: int = -1
         self._search_matches: list = []
         self._merged_hidden: list[ParagraphCard] = []
+        self._deleted_images: set[str] = set()  # 已删除图片路径，持久化后跳过渲染
+        self._deleted_paragraphs: set[int] = set()  # 已删除段落索引，持久化后跳过渲染
         self._cards: list = []
         self._pdf_text: str = ""
         self._paragraphs: list[dict] = []
@@ -668,11 +757,12 @@ class PDFViewerPanel(QWidget):
         # 阅读区
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setStyleSheet("QScrollArea { border: none; background: #1a1b26; }")
 
         # 始终使用 container 作为 scroll 的 widget，不再切换
         self.container = QWidget()
+        self.container.setMinimumWidth(0)
         self.container.setStyleSheet("background: #1a1b26;")
         self.container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.card_layout = QVBoxLayout(self.container)
@@ -706,7 +796,7 @@ class PDFViewerPanel(QWidget):
                 self._search_bar_widget.setVisible(False)
                 self._clear_search_highlights()
                 return True
-        # 视口大小变化 → 更新所有卡片宽度
+        # 视口大小变化
         if obj is self.scroll_area.viewport() and event.type() == QEvent.Type.Resize:
             if self.container:
                 self.container.updateGeometry()
@@ -720,41 +810,55 @@ class PDFViewerPanel(QWidget):
             self.load_pdf(path)
 
     def load_pdf(self, file_path: str):
+        self._flush_save_state()
+
         try:
             from ..core.pdf_parser import PDFParser
-            from ..utils.config import get_image_cache_dir
+            from ..utils.config import get_image_cache_dir, load_paragraph_cache, save_paragraph_cache
 
-            # 清理旧状态（不清除 _current_path，由外层控制）
             self._cards.clear()
             self._formatted.clear()
             self._format_pending.clear()
             self._paragraphs = []
             self._pdf_text = ""
 
-            # 清空卡片布局
+            # 提前加载已删除图片/段落记录（_render_content 需要用到）
+            from ..utils.config import load_doc_state
+            saved = load_doc_state(file_path)
+            self._deleted_images = set(saved.get("deleted_images", [])) if saved else set()
+            self._deleted_paragraphs = set(saved.get("deleted_paragraphs", [])) if saved else set()
+
             while self.card_layout.count():
                 item = self.card_layout.takeAt(0)
                 if item.widget():
                     item.widget().deleteLater()
 
-            self.info_label.setText("⏳ 正在打开 PDF...")
-            self.info_label.setStyleSheet("color: #e0af68;")
-            QApplication.processEvents()
-
             self._image_dir = str(get_image_cache_dir())
-            self._parser = PDFParser(file_path)
-            self._parser.set_image_output_dir(self._image_dir)
 
-            self.info_label.setText("⏳ 正在提取全文...")
-            QApplication.processEvents()
-            self._pdf_text = self._parser.extract_full_text()
-            page_count = self._parser.page_count
+            cached = load_paragraph_cache(file_path)
+            if cached:
+                self._paragraphs, self._pdf_text = cached
+                page_count = max((p.get("page", 0) for p in self._paragraphs), default=0)
+                self.info_label.setText("📖 从缓存加载...")
+                self.info_label.setStyleSheet("color: #9ece6a;")
+                QApplication.processEvents()
+                self._parser = PDFParser(file_path)
+                self._parser.set_image_output_dir(self._image_dir)
+            else:
+                self.info_label.setText("⏳ 正在打开 PDF...")
+                self.info_label.setStyleSheet("color: #e0af68;")
+                QApplication.processEvents()
+                self._parser = PDFParser(file_path)
+                self._parser.set_image_output_dir(self._image_dir)
+                self.info_label.setText("⏳ 正在提取全文...")
+                QApplication.processEvents()
+                self._pdf_text = self._parser.extract_full_text()
+                page_count = self._parser.page_count
+                self.info_label.setText("⏳ 正在智能分段...")
+                QApplication.processEvents()
+                self._paragraphs = self._parser.extract_structured_paragraphs(skip_images=True)
+                save_paragraph_cache(file_path, self._paragraphs, self._pdf_text)
 
-            self.info_label.setText("⏳ 正在智能分段...")
-            QApplication.processEvents()
-            self._paragraphs = self._parser.extract_structured_paragraphs(skip_images=True)
-
-            # 统计
             text_paras = [p for p in self._paragraphs if p.get("text", "").strip()]
             heading_count = sum(1 for p in self._paragraphs if p.get("is_heading"))
             meta_count = sum(1 for p in self._paragraphs if p.get("is_meta"))
@@ -783,9 +887,10 @@ class PDFViewerPanel(QWidget):
             self.info_label.setStyleSheet("color: #f7768e;")
 
     def _start_image_loading(self):
-        """后台异步提取图片并插入卡片"""
         if not hasattr(self, '_parser') or not self._parser:
             return
+        if self._img_load_worker and self._img_load_worker.isRunning():
+            self._img_load_worker.wait()
         self._img_load_worker = ImageLoadWorker(self._parser)
         self._img_load_worker.images_ready.connect(self._on_images_loaded)
         self._img_load_worker.start()
@@ -797,6 +902,8 @@ class PDFViewerPanel(QWidget):
         self._format_pending = {}
         self._pdf_text = ""
         self._paragraphs = []
+        self._deleted_images = set()
+        self._deleted_paragraphs = set()
 
         # 清空容器内所有内容
         while self.card_layout.count():
@@ -832,6 +939,8 @@ class PDFViewerPanel(QWidget):
         inserted = 0
         for page_num in sorted(imgs_by_page.keys()):
             for img_info in imgs_by_page[page_num]:
+                if img_info["path"] in self._deleted_images:
+                    continue
                 img_card = ImageCard(img_info["path"], page_num)
                 img_card.explain_requested.connect(self._on_image_explain)
                 img_card.follow_up.connect(self._on_follow_up)
@@ -876,6 +985,8 @@ class PDFViewerPanel(QWidget):
         card_count = 0
         for i, para in enumerate(self._paragraphs):
             if para.get("image_path"):
+                if para["image_path"] in self._deleted_images:
+                    continue  # 用户删除过的图片，跳过
                 card = ImageCard(para["image_path"], para.get("page", 0))
                 card.explain_requested.connect(self._on_image_explain)
                 card.follow_up.connect(self._on_follow_up)
@@ -885,6 +996,8 @@ class PDFViewerPanel(QWidget):
                 self._cards.append(card)
                 card_count += 1
             elif para.get("text", "").strip():
+                if i in self._deleted_paragraphs:
+                    continue  # 用户删除过的段落，跳过
                 card = ParagraphCard(para, i)
                 card.translate_requested.connect(self._on_translate)
                 if hasattr(card, '_checkbox'):
@@ -915,8 +1028,7 @@ class PDFViewerPanel(QWidget):
         self.container.adjustSize()
         self.scroll_area.verticalScrollBar().setValue(0)
 
-        if self._format_enabled and card_count > 0:
-            QTimer.singleShot(100, self._check_visible_and_format)
+        # 不在此调度自动排版——等 _restore_state 恢复已保存状态后再触发
 
     # ---- 翻译 ----
 
@@ -977,6 +1089,8 @@ class PDFViewerPanel(QWidget):
                 break
 
     def _explain_image(self, card: ImageCard, image_path: str):
+        if hasattr(self, '_img_worker') and self._img_worker and self._img_worker.isRunning():
+            return  # 上一张图还在分析中
         self._img_worker = ImageExplainWorker(self._llm_image, image_path)
         self._img_worker.done.connect(lambda t: (card.show_explanation(t), setattr(self, '_img_worker', None)))
         self._img_worker.err.connect(lambda e: (card.show_explain_error(e), setattr(self, '_img_worker', None)))
@@ -1191,6 +1305,10 @@ class PDFViewerPanel(QWidget):
         if not state:
             return
 
+        # 恢复已删除图片记录和段落索引
+        self._deleted_images = set(state.get("deleted_images", []))
+        self._deleted_paragraphs = set(state.get("deleted_paragraphs", []))
+
         # 恢复自动翻译/排版开关
         if state.get("auto_translate", False) != self._auto_translate:
             self._on_toggle_auto_translate()
@@ -1248,19 +1366,35 @@ class PDFViewerPanel(QWidget):
         # 应用自动翻译/排版可见性
         self._apply_auto_visibility()
 
+        # 状态恢复完成后再触发自动排版（避免 auto-format 覆盖已保存状态）
+        if self._format_enabled and self._auto_format and self._cards:
+            QTimer.singleShot(300, self._check_visible_and_format)
+
     def _save_state(self):
         """防抖保存（2s）"""
-        if hasattr(self, '_save_timer') and self._save_timer.isActive():
-            return  # 已有待处理的保存，跳过
+        path = self._current_path
+        if not path:
+            return
         if not hasattr(self, '_save_timer'):
             self._save_timer = QTimer(self)
             self._save_timer.setSingleShot(True)
-            self._save_timer.timeout.connect(self._do_save_state)
-        self._save_timer.start(2000)  # 2秒防抖
+        else:
+            self._save_timer.stop()
+            try:
+                self._save_timer.timeout.disconnect()
+            except RuntimeError:
+                pass  # 首次调用时尚未连接，忽略
+        self._save_timer.timeout.connect(lambda p=path: self._do_save_state_for(p))
+        self._save_timer.start(2000)
 
-    def _do_save_state(self):
-        if not self._current_path:
-            return
+    def _flush_save_state(self):
+        """立即保存当前状态并停止定时器"""
+        if hasattr(self, '_save_timer') and self._save_timer.isActive():
+            self._save_timer.stop()
+        if self._current_path:
+            self._do_save_state_for(self._current_path)
+
+    def _do_save_state_for(self, path: str):
         from ..utils.config import save_doc_state
 
         formatted_dict = {}
@@ -1279,8 +1413,10 @@ class PDFViewerPanel(QWidget):
             "scroll_pos": self.scroll_area.verticalScrollBar().value(),
             "auto_translate": self._auto_translate,
             "auto_format": self._auto_format,
+            "deleted_images": list(self._deleted_images),
+            "deleted_paragraphs": sorted(self._deleted_paragraphs),
         }
-        save_doc_state(self._current_path, state)
+        save_doc_state(path, state)
 
     def _batch_adjust_layout(self):
         self.container.updateGeometry()
@@ -1291,9 +1427,23 @@ class PDFViewerPanel(QWidget):
         return self._current_path
 
     def save_state_now(self):
-        if hasattr(self, '_save_timer') and self._save_timer.isActive():
-            self._save_timer.stop()
-        self._do_save_state()
+        self._flush_save_state()
+
+    def shutdown(self):
+        """关闭前清理所有后台线程，避免 QThread 销毁警告"""
+        workers = [
+            getattr(self, '_img_worker', None),
+            getattr(self, '_img_load_worker', None),
+            getattr(self, '_trans_worker', None),
+            getattr(self, '_format_worker', None),
+            getattr(self, '_merge_worker', None),
+        ]
+        for w in workers:
+            if w is not None and w.isRunning():
+                w.quit()
+                if not w.wait(3000):
+                    w.terminate()
+                    w.wait()
 
     def get_pdf_text(self) -> str:
         return self._pdf_text
@@ -1383,6 +1533,11 @@ class PDFViewerPanel(QWidget):
             return
         for card in to_remove:
             self._formatted.discard(getattr(card, '_index', -1))
+            # 记录被删图片路径/段落索引，下次打开不再渲染
+            if isinstance(card, ImageCard):
+                self._deleted_images.add(card._image_path)
+            elif isinstance(card, ParagraphCard):
+                self._deleted_paragraphs.add(card._index)
             self.card_layout.removeWidget(card)
             card.deleteLater()
             if card in self._cards:

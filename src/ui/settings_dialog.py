@@ -1,6 +1,4 @@
-"""
-API 配置对话框 —— 排版 / 翻译 / 图析 / 聊天 / 综述写作 五套 API 独立配置
-"""
+"""API 配置对话框 —— 五套 API 独立配置"""
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -14,7 +12,6 @@ from ..utils.config import load_config, save_config, get_api_config
 
 
 class APIConfigTab(QWidget):
-    """单个 API 配置标签页"""
 
     def __init__(self, tab_name: str, description: str, parent=None):
         super().__init__(parent)
@@ -50,7 +47,7 @@ class APIConfigTab(QWidget):
         form.addRow("Base URL:", self.base_url)
         self.model = QComboBox()
         self.model.setEditable(True)
-        self.model.setPlaceholderText("deepseek-v4-flash")
+        self.model.setPlaceholderText("选择或输入模型名")
         form.addRow("模型:", self.model)
         layout.addWidget(cfg)
 
@@ -60,27 +57,22 @@ class APIConfigTab(QWidget):
         info = PROVIDERS.get(name, {})
         self.provider_desc.setText(info.get("description", ""))
         self.base_url.setText(info.get("base_url", ""))
-        models = info.get("models", [])
-        self.model.clear()
-        if models:
-            self.model.addItems(models)
-            self.model.setCurrentIndex(0)
-        else:
-            self.model.setCurrentText("")
+        self._populate_models()
 
     def load(self, api_cfg: dict):
         p = api_cfg.get("provider", "DeepSeek")
         idx = self.provider_combo.findText(p)
         if idx >= 0:
             self.provider_combo.setCurrentIndex(idx)
-            # _on_provider 已触发，模型列表已填充
         else:
             self.provider_combo.setCurrentIndex(0)
         self.api_key.setText(api_cfg.get("api_key", ""))
-        # base_url 优先用已保存的，否则用 provider 默认值
         saved_url = api_cfg.get("base_url", "")
         if saved_url:
             self.base_url.setText(saved_url)
+
+        # 始终手动填充模型列表（setCurrentIndex 可能因 index 不变而不触发 signal）
+        self._populate_models()
         m = api_cfg.get("model", "")
         if m:
             idx = self.model.findText(m)
@@ -88,6 +80,18 @@ class APIConfigTab(QWidget):
                 self.model.setCurrentIndex(idx)
             else:
                 self.model.setCurrentText(m)
+
+    def _populate_models(self):
+        name = self.provider_combo.currentText()
+        info = PROVIDERS.get(name, {})
+        self.provider_desc.setText(info.get("description", ""))
+        models = info.get("models", [])
+        self.model.clear()
+        if models:
+            self.model.addItems(models)
+            self.model.setCurrentIndex(0)
+        else:
+            self.model.setCurrentText("")
 
     def get(self) -> dict:
         return {
@@ -130,9 +134,6 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._image_tab, "🖼️ 图析")
         self.tabs.addTab(self._chat_tab, "💬 聊天")
         self.tabs.addTab(self._review_tab, "📝 综述写作")
-        self.tabs.addTab(self._image_tab, "🖼️ 图析")
-        self.tabs.addTab(self._review_tab, "📝 综述写作")
-        self.tabs.addTab(self._format_tab, "🔤 排版")
         layout.addWidget(self.tabs)
 
         btn = QHBoxLayout()

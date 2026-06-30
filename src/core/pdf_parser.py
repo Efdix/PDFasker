@@ -570,43 +570,62 @@ class PDFParser:
 
     # ---- 章节标题匹配 ----
 
+    # 常见章节标题关键词（独立成行时）
+    _SECTION_KEYWORDS = [
+        "Abstract", "Introduction", "Related Work", "Literature Review",
+        "Background", "Motivation", "Problem Statement", "Problem Formulation",
+        "Method", "Methods", "Methodology", "Approach",
+        "Proposed Method", "Proposed Approach", "Proposed Framework", "Proposed Model",
+        "Experiment", "Experiments", "Experimental Setup", "Experimental Design",
+        "Experimental Results", "Experimental Evaluation", "Implementation",
+        "Result", "Results", "Results and Discussion", "Results and Analysis",
+        "Evaluation", "Findings", "Performance",
+        "Discussion", "Analysis", "Ablation Study", "Ablation Studies", "Case Study",
+        "Conclusion", "Conclusions", "Summary", "Future Work", "Outlook", "Limitations",
+        "References", "Bibliography", "Acknowledgments", "Acknowledgement",
+        "Appendix", "Appendices", "Supplementary", "Supplemental",
+        "Data Availability", "Code Availability", "Author Contributions",
+        "Conflict of Interest", "Declaration",
+        "摘要", "引言", "绪论", "前言", "背景", "相关工作", "文献综述", "问题描述", "研究动机",
+        "方法", "方法论", "实验", "实验设计", "实验方法", "实验设置", "实验分析", "模型", "框架",
+        "结果", "结果与讨论", "结果分析", "评估", "发现", "主要发现", "性能评估",
+        "讨论", "结论", "总结", "展望", "未来工作", "不足与展望", "消融实验", "案例分析",
+        "参考文献", "致谢", "附录", "补充材料",
+        "数据可用性", "代码可用性", "作者贡献", "利益冲突",
+    ]
+
+    @staticmethod
+    def _extract_section_keyword(text: str) -> tuple[str, str]:
+        """若文本以章节关键词开头后跟 : . 空格，返回 (关键词, 剩余文本)，否则 ('', '')"""
+        t = text.strip()
+        for kw in PDFParser._SECTION_KEYWORDS:
+            m = re.match(r'(' + re.escape(kw) + r')\s*[:：.\s]\s*(.+)', t, re.IGNORECASE)
+            if m:
+                return m.group(1), m.group(2)
+        return "", ""
+
     @staticmethod
     def _is_section_header(text: str) -> bool:
+        """检测纯标题行 或 以标题关键词开头后跟 : . 空格 的长文本"""
         t = text.strip()
-        if len(t) > 120:
+        if not t:
             return False
 
-        patterns = [
-            # 英文
-            r'^(Abstract|摘要)$',
-            r'^(Introduction|Intro\.)$',
-            r'^(Related\s*Work|Literature\s*Review|Background|Motivation|Problem\s*(Statement|Formulation)?)$',
-            r'^(Method|Methods|Methodology|Approach|Proposed\s*(Method|Approach|Framework|Model)?)$',
-            r'^(Experiment|Experiments|Experimental\s*(Setup|Design|Results|Evaluation)?|Implementation)$',
-            r'^(Results?|Results?\s*and\s*(Discussions?|Analysis)|Evaluation|Findings|Performance)$',
-            r'^(Discussion|Analysis|Ablation\s*(Study|Studies)?|Case\s*Study)$',
-            r'^(Conclusion|Conclusions?|Summary|Future\s*Work|Outlook|Limitations?)$',
-            r'^(References|Bibliography|Acknowledgments?|Appendix|Appendices|Supplementary|Supplemental)$',
-            r'^(Data\s*Availability|Code\s*Availability|Author\s*Contributions|Conflict\s*of\s*Interest|Declaration)$',
-            # 中文
-            r'^(摘要|引言|绪论|前言|背景|相关工作|文献综述|问题描述|研究动机)$',
-            r'^(方法|方法论|实验|实验设计|实验方法|实验设置|实验分析|模型|框架)$',
-            r'^(结果|结果与讨论|结果分析|评估|发现|主要发现|性能评估)$',
-            r'^(讨论|结论|总结|展望|未来工作|不足与展望|消融实验|案例分析)$',
-            r'^(参考文献|致谢|附录|补充材料)$',
-            r'^(数据可用性|代码可用性|作者贡献|利益冲突)$',
-        ]
-
-        for pat in patterns:
-            if re.match(pat, t, re.IGNORECASE):
+        # 短文本（≤120 字符）：精确匹配或编号章节
+        if len(t) <= 120:
+            for kw in PDFParser._SECTION_KEYWORDS:
+                if t.lower() == kw.lower():
+                    return True
+            # 编号章节：如 "1. Introduction", "第三章 方法"
+            if re.match(
+                r'^\s*(?:\d+\.?\s*|[IVX]+\.\s*|第[一二三四五六七八九十\d]+[章节])\s*\w+', t
+            ):
                 return True
 
-        # 编号章节：如 "1. Introduction", "2.1 Background", "第三章 方法"
-        if re.match(
-            r'^\s*(?:\d+\.?\s*|[IVX]+\.\s*|第[一二三四五六七八九十\d]+[章节])\s*\w+',
-            t
-        ):
-            if len(t) < 120:
+        # 长文本（>120 字符）：检测是否以章节标题关键词开头（后跟 : . 空格）
+        for kw in PDFParser._SECTION_KEYWORDS:
+            pattern = r'^(' + re.escape(kw) + r')\s*[:：.\s]'
+            if re.match(pattern, t, re.IGNORECASE):
                 return True
 
         return False
@@ -686,7 +705,6 @@ class PDFParser:
         return result
 
     def _post_process_section_split(self, paragraphs: list[Paragraph]) -> list[Paragraph]:
-        """在段落内嵌的章节标题处再次分割"""
         result = []
         for para in paragraphs:
             if para.image_path or para.is_heading or para.is_meta:
@@ -697,7 +715,29 @@ class PDFParser:
             buffer_lines = []
             for line in lines:
                 stripped = line.strip()
-                if self._is_section_header(stripped) and len(stripped) < 120:
+                if not stripped:
+                    buffer_lines.append(line)
+                    continue
+
+                # 优先检查：该行是否以章节关键词开头后跟正文
+                kw, rest = PDFParser._extract_section_keyword(stripped)
+                if kw:
+                    if buffer_lines:
+                        result.append(Paragraph(
+                            text='\n'.join(buffer_lines), page=para.page,
+                            bbox=para.bbox, font_size=para.font_size,
+                        ))
+                        buffer_lines = []
+                    result.append(Paragraph(
+                        text=kw, page=para.page,
+                        is_heading=True, bbox=para.bbox, font_size=para.font_size,
+                    ))
+                    if rest:
+                        buffer_lines.append(rest)
+                    continue
+
+                # 短行精确匹配标题
+                if self._is_section_header(stripped) and len(stripped) <= 120:
                     if buffer_lines:
                         result.append(Paragraph(
                             text='\n'.join(buffer_lines), page=para.page,

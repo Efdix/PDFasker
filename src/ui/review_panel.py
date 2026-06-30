@@ -9,11 +9,56 @@ from PySide6.QtWidgets import (
     QMessageBox, QFileDialog,
     QSizePolicy, QGroupBox,
 )
-from PySide6.QtCore import Qt, Signal, QThread, QTimer
+from PySide6.QtCore import Qt, Signal, QThread, QTimer, QSize
 from PySide6.QtGui import QFont, QTextCursor
 
 from ..core.review_checker import ReviewChecker, CitationClaim, ReviewCheckResult
 from ..core.zotero_parser import ZoteroLibrary, ZoteroItem
+
+
+# ---- 通用高度计算辅助函数 ----
+def _calc_layout_height(layout, inner_w: int) -> int:
+    """递归计算布局在给定宽度下所需的高度。
+    对 QVBoxLayout 累加子元素高度；对 QHBoxLayout 取最大子元素高度。
+    自动处理嵌套的 widget-with-layout 情况。"""
+    if layout is None:
+        return 0
+    from PySide6.QtWidgets import QHBoxLayout
+    is_horizontal = isinstance(layout, QHBoxLayout)
+    spacing = layout.spacing()
+    total = 0
+    max_h = 0
+    count = layout.count()
+    for i in range(count):
+        item = layout.itemAt(i)
+        if item is None:
+            continue
+        child_h = 0
+        if widget := item.widget():
+            if not widget.isVisible():
+                continue
+            if widget.hasHeightForWidth():
+                child_h = widget.heightForWidth(inner_w)
+            elif widget.layout():
+                w_marg = widget.contentsMargins()
+                w_inner = max(inner_w - w_marg.left() - w_marg.right(), 50)
+                child_h = w_marg.top() + w_marg.bottom() + _calc_layout_height(widget.layout(), w_inner)
+            else:
+                child_h = widget.sizeHint().height()
+        elif sub := item.layout():
+            sub_marg = sub.contentsMargins()
+            sub_inner = max(inner_w - sub_marg.left() - sub_marg.right(), 50)
+            child_h = sub_marg.top() + sub_marg.bottom() + _calc_layout_height(sub, sub_inner)
+        elif item.spacerItem():
+            continue
+        if is_horizontal:
+            max_h = max(max_h, child_h)
+        else:
+            if child_h > 0:
+                total += child_h
+                if i < count - 1:
+                    total += spacing
+    return max_h if is_horizontal else total
 
 
 # ========== 后台核查线程 ==========
@@ -69,6 +114,24 @@ class ClaimResultCard(QFrame):
         super().__init__(parent)
         self._claim = claim
         self._setup_ui()
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        """根据给定宽度计算所需高度，使文字折行后卡片能正确撑高"""
+        marg = self.contentsMargins()
+        inner_w = max(w - marg.left() - marg.right(), 50)
+        lay = self.layout()
+        if lay is None:
+            return 40
+        h = marg.top() + marg.bottom() + _calc_layout_height(lay, inner_w)
+        return max(h, 40)
+
+    def sizeHint(self):
+        """确保 sizeHint 与 heightForWidth 一致"""
+        base = super().sizeHint()
+        return QSize(base.width(), self.heightForWidth(base.width()))
 
     def _setup_ui(self):
         self.setStyleSheet(
@@ -215,6 +278,19 @@ class ReviewPanel(QWidget):
     def set_chat_client(self, client):
         """设置聊天客户端（用于核查后的追问对话）"""
         self._llm_chat = client
+
+    def shutdown(self):
+        """关闭前清理所有后台线程，避免 QThread 销毁警告"""
+        workers = [
+            getattr(self, '_check_worker', None),
+            getattr(self, '_fw', None),
+        ]
+        for w in workers:
+            if w is not None and w.isRunning():
+                w.quit()
+                if not w.wait(3000):
+                    w.terminate()
+                    w.wait()
 
     def set_zotero_path(self, path: str):
         """设置/更换 Zotero 数据目录"""

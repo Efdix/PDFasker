@@ -6,8 +6,51 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton,
     QScrollArea, QLabel, QSizePolicy, QFrame,
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QEvent
+from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QSize
 from PySide6.QtGui import QFont, QKeyEvent
+
+
+# ---- 通用高度计算辅助函数 ----
+def _calc_layout_height(layout, inner_w: int) -> int:
+    """递归计算布局在给定宽度下所需的高度。"""
+    if layout is None:
+        return 0
+    from PySide6.QtWidgets import QHBoxLayout
+    is_horizontal = isinstance(layout, QHBoxLayout)
+    spacing = layout.spacing()
+    total = 0
+    max_h = 0
+    count = layout.count()
+    for i in range(count):
+        item = layout.itemAt(i)
+        if item is None:
+            continue
+        child_h = 0
+        if widget := item.widget():
+            if not widget.isVisible():
+                continue
+            if widget.hasHeightForWidth():
+                child_h = widget.heightForWidth(inner_w)
+            elif widget.layout():
+                w_marg = widget.contentsMargins()
+                w_inner = max(inner_w - w_marg.left() - w_marg.right(), 50)
+                child_h = w_marg.top() + w_marg.bottom() + _calc_layout_height(widget.layout(), w_inner)
+            else:
+                child_h = widget.sizeHint().height()
+        elif sub := item.layout():
+            sub_marg = sub.contentsMargins()
+            sub_inner = max(inner_w - sub_marg.left() - sub_marg.right(), 50)
+            child_h = sub_marg.top() + sub_marg.bottom() + _calc_layout_height(sub, sub_inner)
+        elif item.spacerItem():
+            continue
+        if is_horizontal:
+            max_h = max(max_h, child_h)
+        else:
+            if child_h > 0:
+                total += child_h
+                if i < count - 1:
+                    total += spacing
+    return max_h if is_horizontal else total
 
 
 class ChatBubble(QFrame):
@@ -57,6 +100,24 @@ class ChatBubble(QFrame):
         sep.setStyleSheet("background-color: #2a2c3d; max-height: 1px; margin-top: 4px;")
         layout.addWidget(sep)
 
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        """根据给定宽度计算所需高度，使文字折行后气泡能正确撑高"""
+        marg = self.contentsMargins()
+        inner_w = max(w - marg.left() - marg.right(), 50)
+        lay = self.layout()
+        if lay is None:
+            return 40
+        h = marg.top() + marg.bottom() + _calc_layout_height(lay, inner_w)
+        return max(h, 40)
+
+    def sizeHint(self):
+        """确保 sizeHint 与 heightForWidth 一致"""
+        base = super().sizeHint()
+        return QSize(base.width(), self.heightForWidth(base.width()))
+
     def get_content(self) -> str:
         """获取当前文本内容"""
         return self._content_label.text() if self._content_label else ""
@@ -65,6 +126,7 @@ class ChatBubble(QFrame):
         """追加文本（流式输出）"""
         if self._content_label:
             self._content_label.setText(self._content_label.text() + chunk)
+            self.updateGeometry()
 
 
 class ChatPanel(QWidget):

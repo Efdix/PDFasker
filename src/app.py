@@ -301,6 +301,16 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._save_current_chat()
         self.pdf_viewer.save_state_now()
+
+        # 清理所有后台线程
+        self.pdf_viewer.shutdown()
+        self._review_panel.shutdown()
+        if self._llm_worker and self._llm_worker.isRunning():
+            self._llm_worker.quit()
+            if not self._llm_worker.wait(3000):
+                self._llm_worker.terminate()
+                self._llm_worker.wait()
+
         super().closeEvent(event)
 
     # ---- API 客户端 ----
