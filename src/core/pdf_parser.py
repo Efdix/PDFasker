@@ -1,21 +1,31 @@
-"""
-PDF 解析器 v2 —— 列感知智能段落分割
-=====================================
-列检测 → 阅读顺序排序 → 多维度段落合并 → 标题/元信息识别 → 页眉页脚过滤
+"""PDF 解析器 —— 列感知智能段落分割。
+
+列检测 → 阅读顺序排序 → 多维度段落合并 → 标题/元信息识别 → 页眉页脚过滤。
 """
 
-import io, os, re, statistics
+from __future__ import annotations
+
+import io
+import os
+import re
+import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import fitz  # PyMuPDF
 
+if TYPE_CHECKING:
+    from typing import Optional
 
-# ---- 数据结构 ----
+
+# ============================================================
+# 数据结构
+# ============================================================
 
 @dataclass
 class TextSpan:
+    """单个文本片段（PDF 中的 span）。"""
     text: str
     font: str = ""
     size: float = 10.0
@@ -27,7 +37,7 @@ class TextSpan:
 
 @dataclass
 class TextLine:
-    """单行文本（由多个 span 组成）"""
+    """单行文本（由多个 span 组成）。"""
     text: str
     bbox: tuple          # (x0, y0, x1, y1)
     spans: list = field(default_factory=list)
@@ -38,6 +48,7 @@ class TextLine:
 
 @dataclass
 class Paragraph:
+    """段落对象。"""
     text: str
     page: int
     is_heading: bool = False
@@ -45,44 +56,54 @@ class Paragraph:
     image_path: str = ""
     font_size: float = 10.0
     is_bold: bool = False
-    bbox: tuple = (0, 0, 0, 0)  # 包围盒
+    bbox: tuple = (0, 0, 0, 0)
 
 
-# ---- 工具函数 ----
+# ============================================================
+# 工具函数
+# ============================================================
 
 def _clean_text(text: str) -> str:
-    """修复 PDF 断词、多余空白"""
+    """修复 PDF 提取造成的断词和多余空白。"""
+    # 连字符跨行断词 → 合并
     text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
-    text = re.sub(r'(\w+)-\s+(\w+)', r'\1\2', text)
+    # 连字符 + 空白断词 → 合并
+    text = re.sub(r'(\w+)-[ \t]*\n[ \t]*(\w+)', r'\1\2', text)
+    # 压缩空格
     text = re.sub(r'[ \t]+', ' ', text)
+    # 压缩连续空行
     text = re.sub(r'\n{3,}', '\n\n', text)
-    return '\n'.join(l.strip() for l in text.split('\n')).strip()
+    # 去除每行首尾空白
+    return '\n'.join(line.strip() for line in text.split('\n')).strip()
 
 
 def _bbox_center_x(bbox: tuple) -> float:
+    """计算 bbox 的水平中心坐标。"""
     return (bbox[0] + bbox[2]) / 2
 
 
-# ---- 列检测器 ----
+# ============================================================
+# 列检测器
+# ============================================================
 
 class ColumnDetector:
-    """x 坐标聚类检测文本列"""
+    """基于 x 坐标聚类检测文本列布局。"""
 
-    def __init__(self, x_tolerance: float = 30):
+    def __init__(self, x_tolerance: float = 30) -> None:
         self.x_tolerance = x_tolerance
 
     def detect(self, lines: list[TextLine]) -> list[list[TextLine]]:
-        """按 x 中心聚类分列，返回阅读顺序的列列表"""
+        """按 x 中心聚类分列，返回阅读顺序的列列表。"""
         if not lines:
             return []
 
-        centers = [_bbox_center_x(l.bbox) for l in lines]
+        centers = [_bbox_center_x(line.bbox) for line in lines]
         if len(centers) <= 1:
             return [lines]
 
-        # 按 x 中心排序后聚类
+        # x 中心排序后贪心聚类
         sorted_centers = sorted(centers)
-        clusters = []
+        clusters: list[list[float]] = []
         current = [sorted_centers[0]]
 
         for c in sorted_centers[1:]:
@@ -103,7 +124,7 @@ class ColumnDetector:
         col_ranges.sort(key=lambda r: r[0])
 
         # 将每行分配到最近的列
-        columns = defaultdict(list)
+        columns: dict[int, list[TextLine]] = defaultdict(list)
         for line in lines:
             cx = _bbox_center_x(line.bbox)
             best_col = 0
@@ -116,35 +137,43 @@ class ColumnDetector:
                     best_col = i
             columns[best_col].append(line)
 
-        # 每列内按 y 排序
+        # 每列内按 y 坐标排序
         result = []
         for i in sorted(columns.keys()):
-            col_lines = sorted(columns[i], key=lambda l: l.bbox[1])
-            result.append(col_lines)
+            result.append(sorted(columns[i], key=lambda line: line.bbox[1]))
 
         return result
 
 
-# ---- 主解析器 ----
+# ============================================================
+# 主解析器
+# ============================================================
 
 class PDFParser:
-    """列感知智能段落分割"""
+    """列感知智能段落分割器。
 
-    HEADER_RATIO = 0.08
-    FOOTER_RATIO = 0.08
-    PARA_GAP_RATIO = 1.8
+    特性：
+    - 自动检测多列排版并按阅读顺序重组
+    - 识别标题、元信息（作者/单位）
+    - 过滤页眉页脚重复内容
+    - 提取嵌入图片并保持原位
+    """
+
+    HEADER_RATIO = 0.08      # 页面顶部视为页眉的比例
+    FOOTER_RATIO = 0.08      # 页面底部视为页脚的比例
+    PARA_GAP_RATIO = 1.8     # 行间距大于行高此倍数视为段间距
     SENTENCE_SPLIT_THRESHOLD = 500
-    HEADING_MAX_LEN = 150
-    META_MAX_LEN = 500
+    HEADING_MAX_LEN = 150    # 标题的最大字符数
+    META_MAX_LEN = 500       # 元信息段落的最大字符数
 
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str) -> None:
         self.file_path = file_path
         self._doc = fitz.open(file_path)
-        self._full_text: Optional[str] = None
-        self._blocks: Optional[list[dict]] = None
-        self._images: Optional[list[dict]] = None
+        self._full_text: str | None = None
         self._image_dir: str = ""
-        self._all_lines: Optional[list[TextLine]] = None
+        self._all_lines: list[TextLine] | None = None
+        self._images: list[dict] | None = None   # 图片提取缓存
+        self._blocks: list[dict] | None = None   # 块提取缓存（兼容旧 API）
 
     # ---- 公共 API ----
 
@@ -180,6 +209,43 @@ class PDFParser:
 
     def __exit__(self, *args):
         self.close()
+
+    # ========== 页面渲染（供多模态识别用） ==========
+
+    def render_page_to_base64(self, page_num: int, dpi: int = 150) -> str:
+        """将指定页面渲染为 PNG 图片的 base64 编码字符串。
+
+        Args:
+            page_num: 页码（1-based，与 PDF 页码一致）
+            dpi: 渲染分辨率（默认 150 DPI，平衡清晰度与文件大小）
+
+        Returns:
+            data:image/png;base64,... 格式的字符串，可直接嵌入 API 请求。
+        """
+        import base64
+        page = self._doc[page_num - 1]
+        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        pix = page.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes("png")
+        b64 = base64.b64encode(img_bytes).decode("ascii")
+        return f"data:image/png;base64,{b64}"
+
+    def render_all_pages_to_base64(self, dpi: int = 150) -> list[str]:
+        """渲染所有页面为 base64 PNG 列表（批量调用用）。"""
+        return [self.render_page_to_base64(i + 1, dpi) for i in range(len(self._doc))]
+
+    def extract_text_by_page(self) -> dict[int, str]:
+        """按页提取纯文本，返回 {页码: 文本} 字典。
+
+        与 extract_full_text 不同，此方法不添加页码标记，
+        适合作为原始素材传给 DeepSeek 做整合。
+        """
+        result: dict[int, str] = {}
+        for i, page in enumerate(self._doc, 1):
+            text = page.get_text()
+            if text.strip():
+                result[i] = text.strip()
+        return result
 
     # ========== 文本提取 ==========
 
@@ -435,8 +501,8 @@ class PDFParser:
     def _build_paragraph(
         self, lines: list[TextLine], fonts: list[float],
         bbox: tuple, page_num: int
-    ) -> Optional[Paragraph]:
-        """从一组行构建段落对象"""
+    ) -> Paragraph | None:
+        """从一组行构建段落对象，返回 None 表示空段落。"""
         text = "\n".join(l.text.strip() for l in lines)
         if not text.strip():
             return None

@@ -9,48 +9,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QTimer, QEvent, QSize
 from PySide6.QtGui import QFont, QKeyEvent
 
+from ..utils.layout import calc_layout_height
 
-# ---- 通用高度计算辅助函数 ----
-def _calc_layout_height(layout, inner_w: int) -> int:
-    """递归计算布局在给定宽度下所需的高度。"""
-    if layout is None:
-        return 0
-    from PySide6.QtWidgets import QHBoxLayout
-    is_horizontal = isinstance(layout, QHBoxLayout)
-    spacing = layout.spacing()
-    total = 0
-    max_h = 0
-    count = layout.count()
-    for i in range(count):
-        item = layout.itemAt(i)
-        if item is None:
-            continue
-        child_h = 0
-        if widget := item.widget():
-            if not widget.isVisible():
-                continue
-            if widget.hasHeightForWidth():
-                child_h = widget.heightForWidth(inner_w)
-            elif widget.layout():
-                w_marg = widget.contentsMargins()
-                w_inner = max(inner_w - w_marg.left() - w_marg.right(), 50)
-                child_h = w_marg.top() + w_marg.bottom() + _calc_layout_height(widget.layout(), w_inner)
-            else:
-                child_h = widget.sizeHint().height()
-        elif sub := item.layout():
-            sub_marg = sub.contentsMargins()
-            sub_inner = max(inner_w - sub_marg.left() - sub_marg.right(), 50)
-            child_h = sub_marg.top() + sub_marg.bottom() + _calc_layout_height(sub, sub_inner)
-        elif item.spacerItem():
-            continue
-        if is_horizontal:
-            max_h = max(max_h, child_h)
-        else:
-            if child_h > 0:
-                total += child_h
-                if i < count - 1:
-                    total += spacing
-    return max_h if is_horizontal else total
+
+
 
 
 class ChatBubble(QFrame):
@@ -110,7 +72,7 @@ class ChatBubble(QFrame):
         lay = self.layout()
         if lay is None:
             return 40
-        h = marg.top() + marg.bottom() + _calc_layout_height(lay, inner_w)
+        h = marg.top() + marg.bottom() + calc_layout_height(lay, inner_w)
         return max(h, 40)
 
     def sizeHint(self):

@@ -124,7 +124,7 @@ class SettingsDialog(QDialog):
 
         self.tabs = QTabWidget()
         # 顺序：排版 → 翻译 → 图析 → 聊天 → 综述写作
-        self._format_tab = APIConfigTab("format", "🔤 排版 API — 整理 PDF 提取文本的换行和格式，轻量任务可用便宜模型")
+        self._format_tab = APIConfigTab("format", "🔤 排版/结构 API — AI 识别段落角色（标题/摘要/正文/元信息等）并整理排版，建议用强模型以获得准确的结构标注")
         self._trans_tab = APIConfigTab("trans", "🌐 翻译 API — 英文段落翻译，可用便宜模型")
         self._image_tab = APIConfigTab("image", "🖼️ 图析 API — 解读图表（需多模态模型）")
         self._chat_tab = APIConfigTab("chat", "💬 聊天 API — 基于论文内容的问答对话，建议用最强模型")

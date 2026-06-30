@@ -1,52 +1,47 @@
-"""
-综述写作辅助引擎 —— 根据引文找到真实文献，帮助优化综述内容
-"""
+"""综述写作辅助引擎 —— 根据引文匹配真实文献，对照原文给出改写建议。"""
 
-import os
+from __future__ import annotations
+
 import json
+import os
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from collections.abc import Callable
 
 from .llm_client import LLMClient
-from .zotero_parser import ZoteroLibrary, ZoteroItem
 from .pdf_parser import PDFParser
+from .zotero_parser import ZoteroItem, ZoteroLibrary
 
 
 @dataclass
 class CitationClaim:
-    """综述中的一条引文声明"""
+    """综述中的一条引文声明及其分析结果。"""
     claim_id: int
     claim_text: str                 # 综述原文
-    citation_marker: str            # 引文标记 "[1]", "(Wang, 2020)"
-    matched_item: Optional[ZoteroItem] = None
+    citation_marker: str            # 引文标记，如 "[1]"、"(Wang, 2020)"
+    matched_item: ZoteroItem | None = None
     parsed_title: str = ""
     parsed_authors: str = ""
     parsed_year: str = ""
     topic_keywords: str = ""
     source_context: str = ""        # 从 PDF 检索到的原文段落
-    ai_feedback: str = ""           # AI 的具体反馈
-    rewrite_suggestion: str = ""    # AI 建议的改写方案
-    status: str = ""                # "引用恰当" / "建议补充" / "表述可优化" / "需核实" / "文献未匹配"
+    ai_feedback: str = ""           # AI 反馈
+    rewrite_suggestion: str = ""    # AI 建议的改写版本
+    status: str = ""                # 引用恰当 / 建议补充 / 表述可优化 / 需核实 / 文献未匹配
 
 
 @dataclass
 class ReviewCheckResult:
-    """综述辅助结果"""
+    """综述辅助分析结果。"""
     claims: list[CitationClaim] = field(default_factory=list)
     overall_assessment: str = ""     # 整体修改建议
     structure_suggestions: str = ""  # 结构建议
 
 
 class ReviewChecker:
-    """
-    综述写作辅助器
+    """综述写作辅助器。
 
-    工作流程：
-    1. LLM 从综述中提取带引用的段落
-    2. 在 Zotero 库中匹配真实文献 PDF
-    3. 对照原文，LLM 给出改写建议（而非简单对错判断）
-    4. 生成整体修改方案
+    流程：LLM 提取引文声明 → Zotero 匹配文献 → 对照原文逐条建议 → 整体修改方案。
     """
 
     # 提取引文声明
@@ -125,7 +120,14 @@ class ReviewChecker:
 
 在改写稿末尾，另起一行用 `---` 分隔，然后以列表形式给出「建议补充引用」和「主要修改说明」（各不超过 5 条，每条一句话）。"""
 
-    def __init__(self, llm_client: LLMClient, zotero_lib: ZoteroLibrary):
+    # 常见停用词
+    _STOP_WORDS: frozenset[str] = frozenset({
+        'the', 'and', 'that', 'this', 'for', 'with', 'are', 'was',
+        'were', 'have', 'has', 'been', 'from', 'their', 'which',
+        '等', '了', '的', '是', '在', '和', '与', '或',
+    })
+
+    def __init__(self, llm_client: LLMClient, zotero_lib: ZoteroLibrary) -> None:
         self._llm = llm_client
         self._zotero = zotero_lib
 
@@ -133,13 +135,15 @@ class ReviewChecker:
     def library_available(self) -> bool:
         return self._zotero.is_available
 
-    def check_review(self, review_text: str, progress_callback=None) -> ReviewCheckResult:
-        """
-        对综述文本进行完整的引文分析和写作辅助
+    def check_review(
+        self, review_text: str,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+    ) -> ReviewCheckResult:
+        """对综述文本进行完整的引文分析和写作辅助。
 
-        参数:
-            review_text: 综述全文
-            progress_callback: 进度回调 (step: str, current: int, total: int)
+        Args:
+            review_text: 综述全文。
+            progress_callback: 可选的进度回调 (step_message, current, total)。
         """
         result = ReviewCheckResult()
 
@@ -204,7 +208,7 @@ class ReviewChecker:
         return text
 
     def _match_citations(self, claims_data: list[dict]) -> list[CitationClaim]:
-        """将提取的声明与 Zotero 库匹配，使用主题消歧"""
+        """将提取的声明与 Zotero 库匹配，利用主题关键词消歧。"""
         claims = []
         for i, cd in enumerate(claims_data):
             claim = CitationClaim(
@@ -260,8 +264,8 @@ class ReviewChecker:
 
         return claims
 
-    def _analyze_claim(self, claim: CitationClaim):
-        """对照原文，为一条引文生成修改建议"""
+    def _analyze_claim(self, claim: CitationClaim) -> None:
+        """对照原文，为一条引文生成修改建议。"""
         if not claim.matched_item:
             claim.status = "文献未匹配"
             claim.ai_feedback = "未在文献库中找到匹配的论文。请确认文献已导入 Zotero 且 PDF 附件可用。"
@@ -316,35 +320,23 @@ class ReviewChecker:
             claim.ai_feedback = f"读取 PDF 时出错：{e}"
             claim.rewrite_suggestion = "请检查 PDF 文件是否损坏。"
 
-    def _find_relevant_context(self, full_text: str, claim_text: str, max_chars: int = 8000) -> str:
-        """
-        在 PDF 全文中寻找与声明相关的段落
+    def _find_relevant_context(
+        self, full_text: str, claim_text: str, max_chars: int = 8000,
+    ) -> str:
+        """在 PDF 全文中寻找与声明最相关的段落。
 
-        策略：
-        1. 提取声明中的关键词
-        2. 在 PDF 文本中查找包含关键词的段落
-        3. 返回相关段落的拼接
+        策略：提取关键词 → 段落评分 → 按相关度拼接至字符上限。
         """
-        # 提取声明中的关键词（取长度 > 2 的词）
-        keywords = []
-        # 中英文关键词提取
-        for word in re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', claim_text):
-            if word.lower() not in ('the', 'and', 'that', 'this', 'for', 'with', 'are', 'was',
-                                     'were', 'have', 'has', 'been', 'from', 'their', 'which',
-                                     '等', '了', '的', '是', '在', '和', '与', '或'):
-                keywords.append(word.lower())
+        keywords = [
+            w.lower() for w in re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', claim_text)
+            if w.lower() not in self._STOP_WORDS
+        ]
 
         if not keywords:
-            # 无法提取关键词，返回开头和结尾
-            head = full_text[:max_chars // 2]
-            tail = full_text[-max_chars // 2:]
-            return head + "\n\n...\n\n" + tail
+            return self._fallback_context(full_text, max_chars)
 
-        # 分段落
         paragraphs = re.split(r'\n\s*\n', full_text)
-
-        # 对每个段落评分
-        scored = []
+        scored: list[tuple[int, str]] = []
         for para in paragraphs:
             if len(para.strip()) < 20:
                 continue
@@ -353,27 +345,28 @@ class ReviewChecker:
             if score > 0:
                 scored.append((score, para))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        if not scored:
+            return self._fallback_context(full_text, max_chars)
 
-        # 取最高分的段落
-        result_parts = []
+        scored.sort(key=lambda x: x[0], reverse=True)
+        parts: list[str] = []
         total_chars = 0
-        for score, para in scored:
+        for _, para in scored:
             if total_chars + len(para) > max_chars:
                 remaining = max_chars - total_chars
                 if remaining > 200:
-                    result_parts.append(para[:remaining] + "...")
+                    parts.append(para[:remaining] + "...")
                 break
-            result_parts.append(para)
+            parts.append(para)
             total_chars += len(para)
 
-        if not result_parts:
-            # 没找到相关段落，返回摘要和结论部分
-            head = full_text[:max_chars // 2]
-            tail = full_text[-max_chars // 2:]
-            return head + "\n\n...\n\n" + tail
+        return "\n\n".join(parts)
 
-        return "\n\n".join(result_parts)
+    @staticmethod
+    def _fallback_context(full_text: str, max_chars: int) -> str:
+        """无法匹配关键词时返回文本头尾。"""
+        half = max_chars // 2
+        return full_text[:half] + "\n\n...\n\n" + full_text[-half:]
 
     def _generate_overall(self, review_text: str, claims: list[CitationClaim]) -> str:
         """生成整体改写稿"""

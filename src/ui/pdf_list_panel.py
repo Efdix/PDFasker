@@ -178,10 +178,10 @@ class PDFListPanel(QWidget):
                 QMessageBox.warning(self, "导入失败", str(e))
         self._refresh()
 
-    def _new_folder(self):
+    def _new_folder(self) -> None:
+        """新建文件夹分类（作为标签存在，不需要单独存储）。"""
         name, ok = QInputDialog.getText(self, "新建文件夹", "文件夹名称：")
         if ok and name.strip():
-            # 文件夹作为分类标签存在；这里不需要单独存储
             self._refresh()
 
     def _set_library_path(self):

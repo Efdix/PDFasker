@@ -1,26 +1,51 @@
-"""PDFasker 主窗口"""
+"""PDFasker 主窗口 —— 应用核心，管理各面板和 LLM 客户端。"""
+
+from __future__ import annotations
 
 import os
-from PySide6.QtWidgets import (
-    QMainWindow, QSplitter, QMessageBox,
-    QStatusBar, QLabel, QTabWidget,
-)
+
 from PySide6.QtCore import Qt, QThread, Signal as QtSignal
 from PySide6.QtGui import QAction
+from PySide6.QtWidgets import (
+    QLabel, QMainWindow, QMessageBox,
+    QSplitter, QStatusBar, QTabWidget,
+)
 
-from .ui.styles import STYLESHEET
+from .core.context_manager import ContextManager
+from .core.llm_client import LLMClient
+from .core.review_checker import ReviewChecker
+from .core.zotero_parser import ZoteroLibrary
+from .ui.chat_panel import ChatPanel
 from .ui.pdf_list_panel import PDFListPanel
 from .ui.pdf_viewer import PDFViewerPanel
-from .ui.chat_panel import ChatPanel
-from .ui.settings_dialog import SettingsDialog
 from .ui.review_panel import ReviewPanel
-from .core.llm_client import LLMClient
-from .core.context_manager import ContextManager
-from .core.zotero_parser import ZoteroLibrary
-from .core.review_checker import ReviewChecker
+from .ui.settings_dialog import SettingsDialog
+from .ui.styles import STYLESHEET
 from .utils.config import (
-    load_config, load_chat_history, save_chat_history, delete_chat_history,
+    delete_chat_history, get_api_config,
+    load_chat_history, load_config, save_chat_history,
 )
+
+
+class LLMWorker(QThread):
+    """后台 LLM 调用线程，避免阻塞 UI。"""
+
+    chunk_received = QtSignal(str)
+    finished = QtSignal()
+    error = QtSignal(str)
+
+    def __init__(self, client: LLMClient, messages: list[dict]) -> None:
+        super().__init__()
+        self._client = client
+        self._messages = messages
+
+    def run(self) -> None:
+        try:
+            for chunk in self._client.chat_stream(self._messages):
+                self.chunk_received.emit(chunk)
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class LLMWorker(QThread):
@@ -43,8 +68,9 @@ class LLMWorker(QThread):
 
 
 class MainWindow(QMainWindow):
+    """PDFasker 主窗口 —— 管理论文阅读与综述写作两个 Tab。"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("PDFasker — AI 论文解读助手")
         self.resize(1280, 800)
@@ -55,6 +81,7 @@ class MainWindow(QMainWindow):
         self._llm_trans: LLMClient | None = None
         self._llm_image: LLMClient | None = None
         self._llm_review: LLMClient | None = None
+        self._llm_format: LLMClient | None = None
         self._context_manager = ContextManager(
             max_tokens=self._config.get("max_tokens", 1_000_000)
         )
@@ -150,12 +177,12 @@ class MainWindow(QMainWindow):
         self._status_model_label.setStyleSheet("color: #a6adc8; padding: 2px 8px;")
         self.status_bar.addPermanentWidget(self._status_model_label)
 
-    def _apply_styles(self):
+    def _apply_styles(self) -> None:
         self.setStyleSheet(STYLESHEET)
 
-    # ---- 事件处理 ----
+    # ========== 事件处理 ==========
 
-    def _on_open_pdf(self):
+    def _on_open_pdf(self) -> None:
         self.pdf_viewer._open_pdf()
 
     def _on_pdf_loaded(self, text: str):
@@ -288,7 +315,7 @@ class MainWindow(QMainWindow):
             self._init_all_clients()
             self.status_bar.showMessage("API 配置已更新")
 
-    def _on_about(self):
+    def _on_about(self) -> None:
         QMessageBox.about(
             self, "关于 PDFasker",
             "<h3>PDFasker</h3>"
@@ -298,7 +325,8 @@ class MainWindow(QMainWindow):
             "<p>🆕 论文 AI 排版 · 段落合并 · Zotero 文献库集成</p>"
         )
 
-    def closeEvent(self, event):
+    def closeEvent(self, event) -> None:
+        """窗口关闭时保存状态并清理后台线程。"""
         self._save_current_chat()
         self.pdf_viewer.save_state_now()
 
@@ -313,18 +341,16 @@ class MainWindow(QMainWindow):
 
         super().closeEvent(event)
 
-    # ---- API 客户端 ----
+    # ========== API 客户端初始化 ==========
 
-    def _init_all_clients(self):
-        from .utils.config import get_api_config
+    def _init_all_clients(self) -> None:
+        """根据配置初始化五个 LLM 客户端并注入到各子面板。"""
 
         def _make_client(key: str) -> LLMClient | None:
+            """从配置创建 LLMClient，配置不完整时返回 None。"""
             cfg = get_api_config(self._config, key)
             if cfg.get("api_key") and cfg.get("base_url") and cfg.get("model"):
-                try:
-                    return LLMClient(cfg["api_key"], cfg["base_url"], cfg["model"])
-                except Exception:
-                    return None
+                return LLMClient(cfg["api_key"], cfg["base_url"], cfg["model"])
             return None
 
         self._llm_chat = _make_client("chat_api")
@@ -337,6 +363,7 @@ class MainWindow(QMainWindow):
         self.pdf_viewer.set_translation_client(self._llm_trans)
         self.pdf_viewer.set_image_client(self._llm_image)
         self.pdf_viewer.set_format_client(self._llm_format)
+        self.pdf_viewer.set_chat_client(self._llm_chat)    # DeepSeek整合步骤用
 
         # 更新综述检查器
         self._init_review()
@@ -356,7 +383,8 @@ class MainWindow(QMainWindow):
             self._status_model_label.setText("未配置 API — 请前往设置")
             self._status_model_label.setStyleSheet("color: #e0af68; padding: 2px 8px;")
 
-    def _init_review(self):
+    def _init_review(self) -> None:
+        """初始化综述检查器：加载 Zotero 库并注入到综述面板。"""
         zotero_path = self._config.get("zotero_data_dir", "")
         self._zotero = ZoteroLibrary(zotero_path)
 

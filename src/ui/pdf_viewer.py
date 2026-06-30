@@ -1,6 +1,6 @@
 """PDF 阅读器面板 —— 段落卡片 / 图片展示 / 中英对照 / 追问"""
 
-import os, base64, re
+import os, base64, re, time
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QPushButton,
     QLabel, QFrame, QFileDialog, QTextEdit, QSizePolicy,
@@ -8,6 +8,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QThread, QTimer, QEvent, QSize
 from PySide6.QtGui import QFont, QPixmap, QTextDocument
+
+from ..core.section_splitter import StructureFormatWorker, ImageStructureWorker, IMAGE_STRUCTURE_PROMPT, TextIntegrationWorker
+from ..utils.layout import calc_layout_height
 
 # ---- 常量 ----
 
@@ -197,51 +200,6 @@ def _highlight_keywords(text: str) -> str:
     return f'<div style="white-space: normal; word-wrap: break-word; overflow-wrap: break-word;">{text}</div>'
 
 
-# ---- 通用高度计算辅助函数 ----
-def _calc_layout_height(layout, inner_w: int) -> int:
-    """递归计算布局在给定宽度下所需的高度。
-    对 QVBoxLayout 累加子元素高度；对 QHBoxLayout 取最大子元素高度。
-    自动处理嵌套的 widget-with-layout 情况。"""
-    if layout is None:
-        return 0
-    from PySide6.QtWidgets import QHBoxLayout
-    is_horizontal = isinstance(layout, QHBoxLayout)
-    spacing = layout.spacing()
-    total = 0
-    max_h = 0
-    count = layout.count()
-    for i in range(count):
-        item = layout.itemAt(i)
-        if item is None:
-            continue
-        child_h = 0
-        if widget := item.widget():
-            if not widget.isVisible():
-                continue
-            if widget.hasHeightForWidth():
-                child_h = widget.heightForWidth(inner_w)
-            elif widget.layout():
-                w_marg = widget.contentsMargins()
-                w_inner = max(inner_w - w_marg.left() - w_marg.right(), 50)
-                child_h = w_marg.top() + w_marg.bottom() + _calc_layout_height(widget.layout(), w_inner)
-            else:
-                child_h = widget.sizeHint().height()
-        elif sub := item.layout():
-            sub_marg = sub.contentsMargins()
-            sub_inner = max(inner_w - sub_marg.left() - sub_marg.right(), 50)
-            child_h = sub_marg.top() + sub_marg.bottom() + _calc_layout_height(sub, sub_inner)
-        elif item.spacerItem():
-            continue
-        if is_horizontal:
-            max_h = max(max_h, child_h)
-        else:
-            if child_h > 0:
-                total += child_h
-                if i < count - 1:
-                    total += spacing
-    return max_h if is_horizontal else total
-
-
 class ParagraphCard(QFrame):
     translate_requested = Signal(int, str)
 
@@ -266,7 +224,7 @@ class ParagraphCard(QFrame):
         lay = self.layout()
         if lay is None:
             return 40
-        h = marg.top() + marg.bottom() + _calc_layout_height(lay, inner_w)
+        h = marg.top() + marg.bottom() + calc_layout_height(lay, inner_w)
         return max(h, 40)
 
     def sizeHint(self):
@@ -529,7 +487,7 @@ class ImageCard(QFrame):
         lay = self.layout()
         if lay is None:
             return 40
-        h = marg.top() + marg.bottom() + _calc_layout_height(lay, inner_w)
+        h = marg.top() + marg.bottom() + calc_layout_height(lay, inner_w)
         return max(h, 40)
 
     def sizeHint(self):
@@ -639,7 +597,7 @@ class PDFViewerPanel(QWidget):
         self._llm_image = None
         self._llm_format = None
         self._trans_worker: TranslationWorker | None = None
-        self._format_worker: FormatWorker | None = None
+        self._format_worker: StructureFormatWorker | FormatWorker | None = None
         self._merge_worker: MergeWorker | None = None
         self._img_load_worker: ImageLoadWorker | None = None
         self._pending: dict[int, str] = {}
@@ -654,9 +612,17 @@ class PDFViewerPanel(QWidget):
         self._cards: list = []
         self._pdf_text: str = ""
         self._paragraphs: list[dict] = []
+        self._original_paragraphs: list[dict] = []  # 合并前的原始段落（图像模式匹配用）
         self._formatted: set[int] = set()
         self._format_pending: dict[int, str] = {}
         self._format_enabled: bool = False
+        self._structure_map: dict[int, dict] = {}  # idx -> {label, section_name, ...}
+        self._image_worker: ImageStructureWorker | None = None
+        self._image_result_cache: dict[int, dict] = {}  # page_num -> structured result
+        self._image_enabled: bool = False
+        self._integration_worker: TextIntegrationWorker | None = None
+        self._llm_chat_client = None  # DeepSeek 聊天客户端（整合用）
+        self._integrated_text: str = ""
         self._parser = None
         self._setup_ui()
 
@@ -670,6 +636,10 @@ class PDFViewerPanel(QWidget):
         """设置 AI 排版客户端，有则启用滚动触发排版"""
         self._llm_format = client
         self._format_enabled = client is not None
+
+    def set_chat_client(self, client):
+        """设置聊天客户端（供 DeepSeek 整合步骤使用）"""
+        self._llm_chat_client = client
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -717,6 +687,12 @@ class PDFViewerPanel(QWidget):
         self.auto_format_btn.clicked.connect(self._on_toggle_auto_format)
         self.auto_format_btn.setEnabled(False)
         toolbar.addWidget(self.auto_format_btn)
+
+        self.image_btn = QPushButton("🖼️ 图像识别全文")
+        self.image_btn.setToolTip("将每页渲染为图片，发送给多模态模型进行高精度结构识别（需配置排版或图析 API 支持多模态）")
+        self.image_btn.clicked.connect(self._on_start_image_analysis)
+        self.image_btn.setEnabled(False)
+        toolbar.addWidget(self.image_btn)
         layout.addLayout(toolbar)
 
         # 搜索栏（默认隐藏，Ctrl+F 切换）
@@ -859,6 +835,13 @@ class PDFViewerPanel(QWidget):
                 self._paragraphs = self._parser.extract_structured_paragraphs(skip_images=True)
                 save_paragraph_cache(file_path, self._paragraphs, self._pdf_text)
 
+            # ====== 合并小段落为 ~5000 字大卡片（句子边界安全切分） ======
+            from ..core.section_splitter import merge_paragraphs_into_chunks
+            self._original_paragraphs = [dict(p) for p in self._paragraphs]  # 保存副本供图像模式匹配
+            self._paragraphs = merge_paragraphs_into_chunks(self._paragraphs)
+            # 合并后原删除记录失效（索引已变），清空之
+            self._deleted_paragraphs = set()
+
             text_paras = [p for p in self._paragraphs if p.get("text", "").strip()]
             heading_count = sum(1 for p in self._paragraphs if p.get("is_heading"))
             meta_count = sum(1 for p in self._paragraphs if p.get("is_meta"))
@@ -868,7 +851,7 @@ class PDFViewerPanel(QWidget):
             self._current_path = file_path
             self.pdf_path_changed.emit(file_path)
             self.info_label.setText(
-                f"📖 已加载 · {page_count} 页 · {len(text_paras)} 段"
+                f"📖 已加载 · {page_count} 页 · {len(text_paras)} 卡"
                 + (f" · {heading_count} 标题" if heading_count else "")
                 + (f" · {meta_count} 元信息" if meta_count else "")
                 + (f" · {img_count} 图" if img_count else "")
@@ -876,6 +859,7 @@ class PDFViewerPanel(QWidget):
             self.info_label.setStyleSheet("color: #9ece6a;")
             self.auto_trans_btn.setEnabled(True)
             self.auto_format_btn.setEnabled(True)
+            self.image_btn.setEnabled(True)
             self.pdf_loaded.emit(self._pdf_text)
             QTimer.singleShot(200, lambda: self._restore_state(file_path))
             QTimer.singleShot(100, self._start_image_loading)
@@ -900,10 +884,14 @@ class PDFViewerPanel(QWidget):
         self._cards = []
         self._formatted = set()
         self._format_pending = {}
+        self._structure_map.clear()
         self._pdf_text = ""
         self._paragraphs = []
+        self._original_paragraphs = []
         self._deleted_images = set()
         self._deleted_paragraphs = set()
+        self._image_result_cache.clear()
+        self._image_enabled = False
 
         # 清空容器内所有内容
         while self.card_layout.count():
@@ -975,6 +963,7 @@ class PDFViewerPanel(QWidget):
         self._cards.clear()
         self._formatted.clear()
         self._format_pending.clear()
+        self._structure_map.clear()
 
         # 清空容器内所有旧内容（包括 placeholder）
         while self.card_layout.count():
@@ -1139,6 +1128,115 @@ class PDFViewerPanel(QWidget):
 
         self._start_next_format()
 
+    def _build_card_context(self, idx: int) -> tuple[list[dict], list[dict]]:
+        """构建当前卡片的前后上下文，用于 LLM 结构识别。
+
+        Returns:
+            (prev_contexts, next_contexts): 各包含 {index, text, label?, section_name?}
+        """
+        prev_contexts: list[dict] = []
+        next_contexts: list[dict] = []
+
+        # 构建 (列表位置, 卡片) 的映射
+        card_entries = [(i, c) for i, c in enumerate(self._cards) if isinstance(c, ParagraphCard)]
+        current_pos = next((i for i, (_, c) in enumerate(card_entries) if c._index == idx), -1)
+        if current_pos < 0:
+            return [], []
+
+        # 前 2 张卡片
+        for i in range(max(0, current_pos - 2), current_pos):
+            _, card = card_entries[i]
+            ctx: dict = {
+                "index": card._index,
+                "text": card._text,
+            }
+            if card._index in self._structure_map:
+                sm = self._structure_map[card._index]
+                ctx["label"] = sm.get("label", "")
+                ctx["section_name"] = sm.get("section_name", "")
+            prev_contexts.append(ctx)
+
+        # 后 2 张卡片
+        for i in range(current_pos + 1, min(len(card_entries), current_pos + 3)):
+            _, card = card_entries[i]
+            ctx: dict = {
+                "index": card._index,
+                "text": card._text,
+            }
+            if card._index in self._structure_map:
+                sm = self._structure_map[card._index]
+                ctx["label"] = sm.get("label", "")
+                ctx["section_name"] = sm.get("section_name", "")
+            next_contexts.append(ctx)
+
+        return prev_contexts, next_contexts
+
+    def _apply_structure_style(self, card: ParagraphCard, result: dict) -> None:
+        """根据 LLM 返回的结构标签，更新卡片的字体、字号、颜色等样式。
+
+        Args:
+            card: 目标 ParagraphCard
+            result: LLM 返回的结构化结果 {label, section_name, reformatted, ...}
+        """
+        label = result.get("label", "body")
+
+        if label == "section_header":
+            f = QFont("Microsoft YaHei UI", 16)
+            f.setBold(True)
+            card.text_label.setFont(f)
+            card.text_label.setStyleSheet(
+                "color: #7aa2f7; padding: 8px 0 4px 0; letter-spacing: 0.5px;"
+            )
+            card._is_heading = True
+            card._is_meta = False
+        elif label == "abstract_header":
+            f = QFont("Microsoft YaHei UI", 15)
+            f.setBold(True)
+            card.text_label.setFont(f)
+            card.text_label.setStyleSheet("color: #bb9af7; padding: 6px 0 4px 0;")
+            card._is_heading = True
+            card._is_meta = False
+        elif label == "abstract_body":
+            card.text_label.setStyleSheet(
+                "color: #cfd2e3; line-height: 1.9; padding: 4px 12px; "
+                "background-color: #1e2035; border-left: 3px solid #bb9af7;"
+            )
+            card._is_heading = False
+            card._is_meta = False
+        elif label == "metadata":
+            f = QFont("Microsoft YaHei UI", 10)
+            card.text_label.setFont(f)
+            card.text_label.setStyleSheet("color: #636688; line-height: 1.5; padding: 2px 0;")
+            card._is_heading = False
+            card._is_meta = True
+        elif label in ("header_footer", "reference"):
+            f = QFont("Microsoft YaHei UI", 10)
+            card.text_label.setFont(f)
+            card.text_label.setStyleSheet("color: #565a7a; line-height: 1.4; padding: 2px 0;")
+            card._is_heading = False
+            card._is_meta = True
+        elif label == "keywords":
+            card.text_label.setStyleSheet(
+                "color: #a9b1d6; line-height: 1.6; padding: 4px 0; font-style: italic;"
+            )
+            card._is_heading = False
+            card._is_meta = False
+        elif label == "acknowledgment":
+            card.text_label.setStyleSheet(
+                "color: #9599b5; line-height: 1.6; padding: 4px 0; font-style: italic;"
+            )
+            card._is_heading = False
+            card._is_meta = False
+        elif label in ("figure_caption", "table_caption"):
+            f = QFont("Microsoft YaHei UI", 11)
+            card.text_label.setFont(f)
+            card.text_label.setStyleSheet(
+                "color: #8a8ea6; line-height: 1.5; padding: 4px 0; font-style: italic;"
+            )
+            card._is_heading = False
+            card._is_meta = False
+        # "body", "appendix", "unknown" → 保留默认样式，不做特殊处理
+
     def _start_next_format(self):
         """从队列取下一个段落提交排版"""
         if self._format_worker and self._format_worker.isRunning():
@@ -1150,41 +1248,53 @@ class PDFViewerPanel(QWidget):
         self._start_format(idx, text)
 
     def _start_format(self, idx: int, text: str):
-        """提交单个段落到 AI 排版"""
+        """提交单个段落到 AI 进行结构识别 + 排版整理。"""
         if not self._llm_format:
             self._format_pending.clear()
             return
-        self._format_worker = FormatWorker(self._llm_format, idx, text)
-        self._format_worker.done.connect(self._on_format_done)
-        self._format_worker.err.connect(self._on_format_err)
+        prev_ctx, next_ctx = self._build_card_context(idx)
+        self._format_worker = StructureFormatWorker(
+            self._llm_format, idx, text, prev_ctx, next_ctx,
+        )
+        self._format_worker.done.connect(self._on_structure_done)
+        self._format_worker.err.connect(self._on_structure_err)
         self._format_worker.finished.connect(self._start_next_format)
         self._format_worker.start()
 
-    def _on_format_done(self, idx: int, formatted: str):
-        """排版完成——替换卡片文本，同时更新 _text 以支持后续翻译"""
+    def _on_structure_done(self, idx: int, result: dict):
+        """结构识别完成 —— 更新卡片样式 + 排版文本。"""
         self._formatted.add(idx)
+
+        # 存储结构信息
+        self._structure_map[idx] = {
+            "label": result.get("label", "body"),
+            "section_name": result.get("section_name"),
+        }
+
+        reformatted = result.get("reformatted", "")
+        parse_error = result.get("parse_error")
+
         for card in self._cards:
             if isinstance(card, ParagraphCard) and card._index == idx:
-                # 检查 AI 返回的标记
-                if formatted.startswith("[作者信息]") or formatted.startswith("[出版信息]"):
-                    card._is_meta = True
-                    card.text_label.setStyleSheet("color: #636688; line-height: 1.5; padding: 2px 0;")
-                    card.text_label.setFont(QFont("Microsoft YaHei UI", 10))
-                    clean = formatted
-                    for prefix in ["[作者信息]", "[出版信息]"]:
-                        if clean.startswith(prefix):
-                            clean = clean[len(prefix):].strip()
-                            break
-                    card.text_label.setText(clean)
-                    card._text = clean
-                else:
-                    highlighted = _highlight_keywords(formatted)
+                # 应用结构样式
+                self._apply_structure_style(card, result)
+
+                # 更新文本（优先用排版后的，解析失败则保留原文）
+                if reformatted and not parse_error:
+                    card._text = reformatted
+                    card.text_label.setText(reformatted)
+                elif reformatted and parse_error:
+                    # JSON 解析失败但 LLM 返回了文本 → 当作纯排版结果
+                    card._text = reformatted
+                    highlighted = _highlight_keywords(reformatted)
                     card.text_label.setTextFormat(Qt.TextFormat.RichText)
                     card.text_label.setText(highlighted)
-                    card._text = formatted
-                # 自动翻译（如果开启）
-                if self._auto_translate:
+                # 如果 reformatted 为空，保留原文不变
+
+                # 自动翻译（如果开启且非元信息/页眉页脚）
+                if self._auto_translate and not card._is_meta:
                     self._auto_translate_card(card)
+
                 # 重置排版按钮
                 if hasattr(card, 're_format_btn'):
                     card.re_format_btn.setText("📝 重新排版")
@@ -1193,10 +1303,11 @@ class PDFViewerPanel(QWidget):
                 if hasattr(card, 'format_btn'):
                     card.format_btn.setVisible(False)
                 break
+
         self._save_state()
 
-    def _on_format_err(self, idx: int, err: str):
-        """排版失败——静默跳过，保留原文"""
+    def _on_structure_err(self, idx: int, err: str):
+        """结构识别失败 —— 静默跳过，保留原文。"""
         self._formatted.add(idx)
         for card in self._cards:
             if isinstance(card, ParagraphCard) and card._index == idx:
@@ -1206,7 +1317,7 @@ class PDFViewerPanel(QWidget):
                 if hasattr(card, 'format_btn') and not self._auto_format:
                     card.format_btn.setVisible(True)
                 break
-        print(f"[PDFViewer] 排版失败 idx={idx}: {err}")
+        print(f"[PDFViewer] 结构识别失败 idx={idx}: {err}")
 
     # ---- 手动合并 ----
 
@@ -1305,6 +1416,10 @@ class PDFViewerPanel(QWidget):
         if not state:
             return
 
+        # 如果段落数量不匹配（段落合并导致索引变化），跳过旧状态
+        if state.get("paragraph_count", -1) != len(self._paragraphs):
+            return
+
         # 恢复已删除图片记录和段落索引
         self._deleted_images = set(state.get("deleted_images", []))
         self._deleted_paragraphs = set(state.get("deleted_paragraphs", []))
@@ -1315,7 +1430,19 @@ class PDFViewerPanel(QWidget):
         if state.get("auto_format", False) != self._auto_format:
             self._on_toggle_auto_format()
 
-        # 恢复已排版段落
+        # 恢复结构信息并重新应用样式
+        structure_dict = state.get("structure", {})
+        for card in self._cards:
+            if not isinstance(card, ParagraphCard):
+                continue
+            idx_str = str(card._index)
+            if idx_str in structure_dict:
+                struct_info = structure_dict[idx_str]
+                self._structure_map[card._index] = struct_info
+                # 重新应用结构样式
+                self._apply_structure_style(card, struct_info)
+
+        # 恢复已排版段落（文本内容 + 对无结构信息的老数据做样式降级）
         formatted_dict = state.get("formatted", {})
         for card in self._cards:
             if not isinstance(card, ParagraphCard):
@@ -1324,27 +1451,43 @@ class PDFViewerPanel(QWidget):
             if idx_str in formatted_dict:
                 fmt_text = formatted_dict[idx_str]
                 self._formatted.add(card._index)
-                if fmt_text:
-                    if fmt_text.startswith("[作者信息]") or fmt_text.startswith("[出版信息]"):
-                        card._is_meta = True
-                        card.text_label.setStyleSheet("color: #636688; line-height: 1.5; padding: 2px 0;")
-                        card.text_label.setFont(QFont("Microsoft YaHei UI", 10))
-                        clean = fmt_text
-                        for prefix in ["[作者信息]", "[出版信息]"]:
-                            if clean.startswith(prefix):
-                                clean = clean[len(prefix):].strip()
-                                break
-                        card.text_label.setText(clean)
-                        card._text = clean
-                    else:
-                        highlighted = _highlight_keywords(fmt_text)
-                        card.text_label.setTextFormat(Qt.TextFormat.RichText)
-                        card.text_label.setText(highlighted)
-                        card._text = fmt_text
-                        if hasattr(card, 're_format_btn'):
-                            card.re_format_btn.setVisible(True)
-                        if hasattr(card, 'format_btn'):
-                            card.format_btn.setVisible(False)
+                if not fmt_text:
+                    continue
+
+                # 如果已有结构信息（新版），样式已由 _apply_structure_style 处理，
+                # 这里只需恢复文本，不重复设置样式
+                has_structure = idx_str in structure_dict
+
+                if not has_structure and (fmt_text.startswith("[作者信息]") or fmt_text.startswith("[出版信息]")):
+                    # 旧版兼容：根据前缀标记设置元信息样式
+                    card._is_meta = True
+                    card.text_label.setStyleSheet("color: #636688; line-height: 1.5; padding: 2px 0;")
+                    card.text_label.setFont(QFont("Microsoft YaHei UI", 10))
+                    clean = fmt_text
+                    for prefix in ["[作者信息]", "[出版信息]"]:
+                        if clean.startswith(prefix):
+                            clean = clean[len(prefix):].strip()
+                            break
+                    card.text_label.setText(clean)
+                    card._text = clean
+                elif not has_structure:
+                    # 旧版兼容：无结构信息的普通排版文本
+                    highlighted = _highlight_keywords(fmt_text)
+                    card.text_label.setTextFormat(Qt.TextFormat.RichText)
+                    card.text_label.setText(highlighted)
+                    card._text = fmt_text
+                    if hasattr(card, 're_format_btn'):
+                        card.re_format_btn.setVisible(True)
+                    if hasattr(card, 'format_btn'):
+                        card.format_btn.setVisible(False)
+                else:
+                    # 新版：样式已应用，只恢复文本
+                    card._text = fmt_text
+                    card.text_label.setText(fmt_text)
+                    if hasattr(card, 're_format_btn'):
+                        card.re_format_btn.setVisible(True)
+                    if hasattr(card, 'format_btn'):
+                        card.format_btn.setVisible(False)
 
         # 恢复已翻译（不触发逐个布局更新）
         translated = state.get("translated", {})
@@ -1415,6 +1558,8 @@ class PDFViewerPanel(QWidget):
             "auto_format": self._auto_format,
             "deleted_images": list(self._deleted_images),
             "deleted_paragraphs": sorted(self._deleted_paragraphs),
+            "structure": dict(self._structure_map),  # {idx: {label, section_name}}
+            "paragraph_count": len(self._paragraphs),  # 用于检测段落合并导致的索引变化
         }
         save_doc_state(path, state)
 
@@ -1437,6 +1582,8 @@ class PDFViewerPanel(QWidget):
             getattr(self, '_trans_worker', None),
             getattr(self, '_format_worker', None),
             getattr(self, '_merge_worker', None),
+            getattr(self, '_image_worker', None),
+            getattr(self, '_integration_worker', None),
         ]
         for w in workers:
             if w is not None and w.isRunning():
@@ -1614,6 +1761,258 @@ class PDFViewerPanel(QWidget):
         # 如果开启自动排版，立即检查可见区域
         if self._auto_format:
             self._check_visible_and_format()
+
+    # ---- 图像识别全文（多模态） ----
+
+    def _on_start_image_analysis(self):
+        """点击「🖼️ 图像识别全文」按钮——逐页渲染为图片发给多模态模型。"""
+        if not self._llm_format and not self._llm_image:
+            return
+        if self._image_worker and self._image_worker.isRunning():
+            return
+        if not self._parser or not self._current_path:
+            return
+
+        client = self._llm_image or self._llm_format
+        page_count = self._parser.page_count
+
+        self._image_start_time = time.time()
+        self.image_btn.setText(f"⏳ 0/{page_count} (0s)")
+        self.image_btn.setEnabled(False)
+        self._image_result_cache.clear()
+        self._image_enabled = True
+
+        self._analyze_next_image_page(client, 1, page_count)
+
+    def _analyze_next_image_page(self, client, page_num: int, total: int):
+        """渲染下一页并发送给多模态模型（只看图，不绑定PyMuPDF块编号）。"""
+        if not self._image_enabled:
+            return
+        if page_num > total:
+            self._on_image_analysis_complete()
+            return
+
+        try:
+            img_b64 = self._parser.render_page_to_base64(page_num, dpi=72)
+        except Exception as e:
+            print(f"[PDFViewer] 渲染第{page_num}页失败: {e}")
+            QTimer.singleShot(200, lambda: self._analyze_next_image_page(client, page_num + 1, total))
+            return
+
+        elapsed = int(time.time() - self._image_start_time)
+        self.image_btn.setText(f"⏳ Mimo {page_num}/{total} ({elapsed}s)")
+
+        if self._image_worker and not self._image_worker.isRunning():
+            self._image_worker = None
+
+        self._image_worker = ImageStructureWorker(client, page_num, img_b64, IMAGE_STRUCTURE_PROMPT)
+        self._image_worker.done.connect(
+            lambda p, r, c=client, t=total: self._on_image_page_done(p, r, c, t)
+        )
+        self._image_worker.err.connect(
+            lambda p, e, c=client, t=total: self._on_image_page_err(p, e, c, t)
+        )
+        self._image_worker.start()
+
+    def _on_image_page_done(self, page_num: int, result: dict, client, total: int):
+        """单页图像识别完成——缓存结果，延迟后继续下一页。"""
+        self._image_result_cache[page_num] = result
+        n_elem = len(result.get("elements", []))
+        role = result.get("page_role", "?")
+        if result.get("parse_error"):
+            print(f"[PDFViewer] 第{page_num}页解析警告 ({n_elem}元素, {role}): {result['parse_error']}")
+        else:
+            print(f"[PDFViewer] 第{page_num}页完成 ({n_elem}元素, {role})")
+        # 500ms 延迟避免 API 限流
+        QTimer.singleShot(500, lambda: self._analyze_next_image_page(client, page_num + 1, total))
+
+    def _on_image_page_err(self, page_num: int, err: str, client, total: int):
+        """单页图像识别失败——跳过，延迟后继续下一页。"""
+        print(f"[PDFViewer] 第{page_num}页图像识别失败: {err}")
+        self._image_result_cache[page_num] = {"page_role": "body", "elements": [], "reading_order": [], "parse_error": err}
+        QTimer.singleShot(500, lambda: self._analyze_next_image_page(client, page_num + 1, total))
+
+    def _on_image_analysis_complete(self):
+        """Mimo 全部识别完成——启动 DeepSeek 整合步骤。"""
+        total_ok = sum(
+            1 for r in self._image_result_cache.values()
+            if isinstance(r, dict) and not r.get("parse_error") and r.get("elements")
+        )
+        print(f"[PDFViewer] Mimo完成: {total_ok}/{len(self._image_result_cache)} 页有效")
+
+        if total_ok == 0:
+            self.image_btn.setText("❌ 无有效结果")
+            self.image_btn.setStyleSheet("")
+            self.image_btn.setEnabled(True)
+            self._image_enabled = False
+            return
+
+        # 启动 DeepSeek 整合
+        self.image_btn.setText("🧠 DeepSeek整合中...")
+        self._start_integration()
+
+    def _start_integration(self):
+        """将 PyMuPDF 全文 + Mimo 结构描述发给 DeepSeek 整合。"""
+        if not self._llm_chat_client:
+            print("[PDFViewer] 未配置聊天API，无法整合")
+            self._finish_image_analysis()
+            return
+
+        # 提取 PyMuPDF 按页全文
+        page_texts = {}
+        if self._parser:
+            try:
+                page_texts = self._parser.extract_text_by_page()
+            except Exception as e:
+                print(f"[PDFViewer] 提取按页文本失败: {e}")
+
+        # 收集 Mimo 结构描述（只取有效的）
+        page_structures = {
+            pg: r for pg, r in self._image_result_cache.items()
+            if isinstance(pg, int) and isinstance(r, dict) and not r.get("parse_error")
+        }
+
+        if not page_texts or not page_structures:
+            print("[PDFViewer] 缺少材料，跳过整合")
+            self._finish_image_analysis()
+            return
+
+        self._integration_worker = TextIntegrationWorker(
+            self._llm_chat_client, page_texts, page_structures
+        )
+        self._integration_worker.done.connect(self._on_integration_done)
+        self._integration_worker.err.connect(self._on_integration_err)
+        self._integration_worker.finished.connect(
+            lambda: setattr(self, '_integration_worker', None)
+        )
+        self._integration_worker.start()
+
+    def _on_integration_done(self, integrated_text: str):
+        """DeepSeek 整合完成——重建卡片。"""
+        print(f"[PDFViewer] DeepSeek整合完成: {len(integrated_text)} 字符")
+        self._integrated_text = integrated_text
+        self._rebuild_from_integration(integrated_text)
+        self._finish_image_analysis()
+
+    def _on_integration_err(self, err: str):
+        """DeepSeek 整合失败——用 Mimo 原始结果重建。"""
+        print(f"[PDFViewer] DeepSeek整合失败: {err}")
+        self._finish_image_analysis()
+
+    def _finish_image_analysis(self):
+        """清理图像分析状态。"""
+        self.image_btn.setText("✅ 图像识别完成")
+        self.image_btn.setStyleSheet(
+            "QPushButton { background-color: #9ece6a; color: #1a1b26; font-weight: bold; }"
+        )
+        QTimer.singleShot(3000, lambda: (
+            self.image_btn.setText("🖼️ 图像识别全文"),
+            self.image_btn.setStyleSheet(""),
+            self.image_btn.setEnabled(True),
+        ))
+        self._image_enabled = False
+        self._save_state()
+
+    def _rebuild_from_integration(self, integrated_text: str):
+        """解析 DeepSeek 整合后的干净文本，重建卡片。
+
+        标记格式:
+            # 标题或章节名          → 大号蓝色卡片
+            正文段落(无标记)         → 默认样式卡片
+            -- 参考文献条目          → 小号灰色卡片
+            ;; 元信息(作者/DOI等)    → 小号灰色卡片
+            [图表页: 描述]           → 特殊卡片
+        """
+        new_paragraphs: list[dict] = []
+        current_lines: list[str] = []
+        current_type = "body"
+
+        def _flush():
+            nonlocal current_lines, current_type
+            text = "\n".join(current_lines).strip()
+            current_lines = []
+            if not text:
+                return
+            is_heading = current_type == "heading"
+            is_meta = current_type in ("meta", "ref")
+            new_paragraphs.append({
+                "text": text, "page": 0,
+                "is_heading": is_heading, "is_meta": is_meta,
+                "bbox": (0, 0, 0, 0), "_role": current_type,
+            })
+
+        for line in integrated_text.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                _flush()
+                continue
+
+            if stripped.startswith("# "):
+                _flush()
+                current_type = "heading"
+                current_lines.append(stripped[2:])
+            elif stripped.startswith("-- "):
+                _flush()
+                current_type = "ref"
+                current_lines.append(stripped[3:])
+            elif stripped.startswith(";; "):
+                _flush()
+                current_type = "meta"
+                current_lines.append(stripped[3:])
+            elif stripped.startswith("[图表页:"):
+                _flush()
+                current_type = "figure_page"
+                current_lines.append(stripped)
+            else:
+                if not current_lines:
+                    current_type = "body"
+                current_lines.append(stripped)
+
+        _flush()
+
+        if not new_paragraphs:
+            # 降级: 按空行分段
+            for para in integrated_text.split("\n\n"):
+                para = para.strip()
+                if para:
+                    # 去掉可能的标记前缀
+                    if para.startswith("# "):
+                        role = "heading"
+                        para = para[2:]
+                    elif para.startswith("-- "):
+                        role = "ref"
+                        para = para[3:]
+                    elif para.startswith(";; "):
+                        role = "meta"
+                        para = para[3:]
+                    else:
+                        role = "body"
+                    new_paragraphs.append({
+                        "text": para, "page": 0,
+                        "is_heading": role == "heading",
+                        "is_meta": role in ("meta", "ref"),
+                        "bbox": (0, 0, 0, 0), "_role": role,
+                    })
+
+        # 结构映射
+        self._structure_map.clear()
+        for i, para in enumerate(new_paragraphs):
+            role = para.get("_role", "body")
+            mapped = {"heading": "section_header", "meta": "metadata",
+                      "ref": "reference", "figure_page": "body"}.get(role, "body")
+            self._structure_map[i] = {"label": mapped, "section_name": None}
+            if role == "heading":
+                self._structure_map[i]["section_name"] = para["text"][:80]
+
+        self._paragraphs = new_paragraphs
+        self._formatted = set(range(len(new_paragraphs)))
+        self._render_content()
+
+        for card in self._cards:
+            if isinstance(card, ParagraphCard) and card._index in self._structure_map:
+                self._apply_structure_style(card, self._structure_map[card._index])
+
+        print(f"[PDFViewer] 整合完成: {len(new_paragraphs)} 卡")
 
     def _apply_auto_visibility(self):
         for card in self._cards:

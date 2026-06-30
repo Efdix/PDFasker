@@ -1,21 +1,23 @@
-"""
-Zotero 文献库解析器 —— 读取 Zotero 数据库，建立引文→PDF 映射
-"""
+"""Zotero 文献库解析器 —— 读取 Zotero 数据库，建立引文→PDF 映射。"""
 
+from __future__ import annotations
+
+import hashlib
 import os
 import re
-import hashlib
 import sqlite3
-from pathlib import Path
+import tempfile
+import shutil
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
 
 
 @dataclass
 class ZoteroItem:
-    """单条 Zotero 文献条目"""
+    """单条 Zotero 文献条目。"""
+
     item_id: int
-    key: str                          # Zotero 8-char 存储 key
+    key: str                          # Zotero 8 字符存储 key
     title: str = ""
     authors: list[str] = field(default_factory=list)  # "LastName, FirstName"
     year: str = ""
@@ -26,14 +28,14 @@ class ZoteroItem:
 
     @property
     def first_author_last(self) -> str:
-        """第一作者姓氏"""
+        """第一作者姓氏。"""
         if self.authors:
             return self.authors[0].split(",")[0].strip()
         return ""
 
     @property
     def cite_key(self) -> str:
-        """生成用于匹配的引文标识"""
+        """生成用于匹配的引文标识（作者, 年份）。"""
         parts = []
         if self.first_author_last:
             parts.append(self.first_author_last.lower())
@@ -43,7 +45,7 @@ class ZoteroItem:
 
     @property
     def searchable_text(self) -> str:
-        """用于模糊匹配的搜索文本"""
+        """用于模糊匹配的搜索文本（标题 + 作者 + 期刊 + DOI 拼接）。"""
         return " ".join([
             self.title.lower(),
             self.first_author_last.lower(),
@@ -54,19 +56,22 @@ class ZoteroItem:
 
 
 class ZoteroLibrary:
-    """Zotero 文献库管理器
+    """Zotero 文献库管理器。
 
     支持多种 Zotero 目录结构：
-      - 标准配置: {data_dir}/zotero.sqlite + {data_dir}/storage/
-      - 新版配置: {data_dir}/profiles/{id}/zotero.sqlite + {data_dir}/storage/
-      - 用户可能选择任意层级，构造函数会自动向上/向下查找
+    - 标准配置: ``{data_dir}/zotero.sqlite`` + ``{data_dir}/storage/``
+    - 新版配置: ``{data_dir}/profiles/{id}/zotero.sqlite`` + ``{data_dir}/storage/``
+    - 无数据库模式：直接扫描 storage 下的 PDF
+
+    构造函数会自动向上/向下查找 zotero.sqlite 和 storage 目录。
     """
 
-    def __init__(self, zotero_data_dir: str = ""):
-        """
-        参数:
-            zotero_data_dir: 用户指定的 Zotero 目录（可以是数据根目录或 profile 子目录）
-                            留空则自动检测
+    def __init__(self, zotero_data_dir: str = "") -> None:
+        """初始化 Zotero 库管理器。
+
+        Args:
+            zotero_data_dir: 用户指定的 Zotero 目录（数据根目录或 profile 子目录）。
+                             留空则自动检测。
         """
         self._data_dir = ""
         self._storage_dir = ""
@@ -83,12 +88,12 @@ class ZoteroLibrary:
             if self._data_dir:
                 self._resolve_paths(self._data_dir)
 
-    def _resolve_paths(self, user_path: str):
-        """
-        智能解析用户提供的路径：
-        1. 递归搜索 zotero.sqlite（或任何含 Zotero 表结构的 .sqlite 文件）
+    def _resolve_paths(self, user_path: str) -> None:
+        """智能解析用户提供的路径。
+
+        1. 递归搜索 zotero.sqlite（或含 Zotero 表结构的 .sqlite 文件）
         2. 查找 storage 目录
-        3. 如果找不到 sqlite，尝试直接扫描 storage 下的 PDF（无数据库模式）
+        3. 找不到 sqlite 时回退到无数据库模式（直接扫描 storage 下的 PDF）
         """
         user_path = os.path.abspath(user_path)
         print(f"[ZoteroLibrary] 解析路径: {user_path}")
@@ -292,14 +297,12 @@ class ZoteroLibrary:
         return self._load_from_sqlite()
 
     def _load_from_sqlite(self) -> int:
-        """从 zotero.sqlite 加载文献条目
-        先复制数据库到临时文件以避免 Zotero 运行时的写入锁冲突
+        """从 zotero.sqlite 加载文献条目。
+
+        先将数据库复制到临时文件以避免 Zotero 运行时的写入锁冲突。
         """
         sqlite_path = self._sqlite_path
         print(f"[ZoteroLibrary] 从 SQLite 加载: {sqlite_path}")
-
-        import tempfile
-        import shutil
 
         tmp_dir = tempfile.mkdtemp(prefix="pdfasker_zotero_")
         tmp_db = os.path.join(tmp_dir, "zotero_copy.sqlite")
@@ -375,8 +378,6 @@ class ZoteroLibrary:
 
         except sqlite3.Error as e:
             print(f"[ZoteroLibrary] SQLite 错误: {e}")
-            import traceback
-            traceback.print_exc()
             return 0
         finally:
             if db_conn:
@@ -488,8 +489,8 @@ class ZoteroLibrary:
 
     # ========== 搜索/匹配 ==========
 
-    def find_by_title(self, title: str) -> Optional[ZoteroItem]:
-        """按标题精确或模糊查找"""
+    def find_by_title(self, title: str) -> ZoteroItem | None:
+        """按标题精确或模糊查找文献。"""
         if not self._items:
             self.load()
 
@@ -508,15 +509,7 @@ class ZoteroLibrary:
         return None
 
     def find_by_citation(self, authors: str, year: str, title_hint: str = "") -> list[ZoteroItem]:
-        """
-        按引文信息查找：作者 + 年份 + 标题提示
-        返回所有匹配的候选文献列表（可能有多个同名同年的作者）
-
-        参数:
-            authors: 第一作者姓氏 或 "Author1, Author2"
-            year: 四位年份
-            title_hint: 标题关键词（可选）
-        """
+        """按作者 + 年份 + 标题提示查找文献，返回所有匹配的候选列表。"""
         if not self._items:
             self.load()
 
@@ -551,28 +544,27 @@ class ZoteroLibrary:
 
         return candidates
 
-    def rank_by_topic(self, candidates: list[ZoteroItem], topic_text: str) -> list[ZoteroItem]:
-        """
-        按主题相关性对候选文献排序。
-        通过解析 PDF 的标题和摘要来判断哪篇文献与用户的研究主题最相关。
+    def rank_by_topic(
+        self, candidates: list[ZoteroItem], topic_text: str,
+    ) -> list[ZoteroItem]:
+        """按主题相关性对候选文献排序。
 
-        参数:
-            candidates: 候选文献列表
-            topic_text: 综述中的局部文本（含研究主题关键词，如"寄生蜂"）
+        通过解析标题、摘要和 PDF 前几页内容来判断与主题的相关度。
         """
         if not candidates or not topic_text:
             return candidates
 
         topic_lower = topic_text.lower()
-        # 提取主题关键词（2-4字中文词，或3+字母英文词）
-        import re
-        keywords = set()
+        # 提取主题关键词（2-4 字中文词 或 3+ 字母英文词，排除停用词）
+        keywords: set[str] = set()
+        stop_words = self._STOP_WORDS if hasattr(self, '_STOP_WORDS') else {
+            'the', 'and', 'that', 'this', 'for', 'with', 'are', 'was',
+            'were', 'have', 'has', 'been', 'from', 'their', 'which',
+            '等', '了', '的', '是', '在', '和', '与', '或',
+        }
         for m in re.finditer(r'[\u4e00-\u9fff]{2,4}|[a-zA-Z]{3,}', topic_lower):
             kw = m.group()
-            if kw not in ('the', 'and', 'that', 'this', 'for', 'with', 'are', 'was',
-                          'were', 'have', 'has', 'been', 'from', 'their', 'which',
-                          '等', '了', '的', '是', '在', '和', '与', '或', '提出', '发现',
-                          '研究', '表明', '结果', '方法', '通过', '本文', '我们'):
+            if kw not in stop_words:
                 keywords.add(kw)
 
         if not keywords:
@@ -615,11 +607,7 @@ class ZoteroLibrary:
         return [item for _, item in scored]
 
     def search(self, query: str, max_results: int = 10) -> list[ZoteroItem]:
-        """
-        全文搜索文献（标题、作者、年份、DOI）
-
-        返回按相关性排序的结果列表
-        """
+        """全文搜索文献（标题、作者、年份、DOI），返回按相关性排序的结果。"""
         if not self._items:
             self.load()
 
