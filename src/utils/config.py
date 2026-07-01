@@ -26,25 +26,27 @@ from pathlib import Path
 _DEFAULT_LIBRARY = Path.home() / "Documents" / "PDFasker_Library"
 
 
-def _default_api(provider: str = "DeepSeek", model: str = "deepseek-v4-flash") -> dict:
-    """生成默认的 API 配置字典。"""
-    return {
-        "provider": provider,
+DEFAULT_CONFIG: dict = {
+    "reading_api": {
+        "provider": "DeepSeek",
         "api_key": "",
         "base_url": "https://api.deepseek.com",
-        "model": model,
-    }
-
-
-DEFAULT_CONFIG: dict = {
-    "chat_api": _default_api("DeepSeek", "deepseek-v4-flash"),
-    "translation_api": _default_api("DeepSeek", "deepseek-v4-flash"),
-    "image_api": _default_api("DeepSeek", "deepseek-v4-flash"),
-    "review_api": _default_api("DeepSeek", "deepseek-v4-flash"),
-    "format_api": _default_api("DeepSeek", "deepseek-v4-flash"),
+        "model": "deepseek-v4-flash",
+        "description": "文献阅读 API — 用于 PDF 结构识别、段落翻译、图片解读、论文问答",
+    },
+    "review_api": {
+        "provider": "DeepSeek",
+        "api_key": "",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
+        "description": "综述写作 API — 用于引文核查、综述优化",
+    },
     "max_tokens": 1_000_000,
     "library_path": str(_DEFAULT_LIBRARY),
     "zotero_data_dir": "",
+    # Stage 1 处理设置
+    "stage1_mode": "async",        # "sync"=逐页顺序 | "async"=并发
+    "stage1_concurrency": 3,       # 异步模式下并发页数（1-10）
 }
 
 # ---- 路径工具 ----
@@ -78,7 +80,7 @@ def _doc_id(file_path: str) -> str:
 # ========== 配置读写 ==========
 
 def load_config() -> dict:
-    """加载配置，兼容旧版本数据格式。"""
+    """加载配置，兼容旧版本 5-API 格式自动迁移到新 2-API 格式。"""
     cf = _config_file()
     if not cf.exists():
         return DEFAULT_CONFIG.copy()
@@ -90,20 +92,43 @@ def load_config() -> dict:
 
     config = DEFAULT_CONFIG.copy()
 
-    # 兼容旧格式：单 API key → 多 API 配置
-    if "api_key" in saved and "chat_api" not in saved:
-        saved["chat_api"] = {
-            "provider": saved.get("provider", "DeepSeek"),
-            "api_key": saved.get("api_key", ""),
-            "base_url": saved.get("base_url", "https://api.deepseek.com"),
-            "model": saved.get("model", "deepseek-v4-flash"),
-        }
-        saved["translation_api"] = saved["chat_api"].copy()
-        saved["image_api"] = saved["chat_api"].copy()
+    # 迁移旧 5-API 格式 → 新 2-API 格式
+    if "reading_api" not in saved:
+        # 优先从 chat_api 或 format_api 迁移
+        old_reading = saved.get("chat_api") or saved.get("format_api") or saved.get("translation_api") or {}
+        if not old_reading and "api_key" in saved:
+            old_reading = {
+                "provider": saved.get("provider", "DeepSeek"),
+                "api_key": saved.get("api_key", ""),
+                "base_url": saved.get("base_url", "https://api.deepseek.com"),
+                "model": saved.get("model", "deepseek-v4-flash"),
+            }
+        if old_reading:
+            saved["reading_api"] = {
+                "provider": old_reading.get("provider", "DeepSeek"),
+                "api_key": old_reading.get("api_key", ""),
+                "base_url": old_reading.get("base_url", "https://api.deepseek.com"),
+                "model": old_reading.get("model", "deepseek-v4-flash"),
+            }
+            saved["reading_api"]["description"] = "文献阅读 API — 用于 PDF 结构识别、段落翻译、图片解读、论文问答"
 
-    # 兼容无 format_api 的旧版本
-    if "format_api" not in saved:
-        saved["format_api"] = saved.get("translation_api", _default_api()).copy()
+    if "review_api" not in saved:
+        old_review = saved.get("review_api") or saved.get("chat_api") or {}
+        if not old_review and "api_key" in saved:
+            old_review = {
+                "provider": saved.get("provider", "DeepSeek"),
+                "api_key": saved.get("api_key", ""),
+                "base_url": saved.get("base_url", "https://api.deepseek.com"),
+                "model": saved.get("model", "deepseek-v4-flash"),
+            }
+        if old_review:
+            saved["review_api"] = {
+                "provider": old_review.get("provider", "DeepSeek"),
+                "api_key": old_review.get("api_key", ""),
+                "base_url": old_review.get("base_url", "https://api.deepseek.com"),
+                "model": old_review.get("model", "deepseek-v4-flash"),
+            }
+            saved["review_api"]["description"] = "综述写作 API — 用于引文核查、综述优化"
 
     config.update(saved)
     return config
@@ -115,9 +140,13 @@ def save_config(config: dict) -> None:
     cf.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def get_api_config(config: dict, key: str) -> dict:
-    """从配置中提取指定 API 的配置，缺失时返回默认值。"""
-    return config.get(key, _default_api())
+def get_reading_api(config: dict) -> dict:
+    """获取文献阅读 API 配置。"""
+    return config.get("reading_api", DEFAULT_CONFIG["reading_api"])
+
+def get_review_api(config: dict) -> dict:
+    """获取综述写作 API 配置。"""
+    return config.get("review_api", DEFAULT_CONFIG["review_api"])
 
 
 # ========== PDF 图书馆 ==========
@@ -296,3 +325,64 @@ def save_paragraph_cache(file_path: str, paragraphs: list[dict], full_text: str 
         "full_text": full_text,
     }
     f.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def delete_paragraph_cache(file_path: str) -> None:
+    """删除某篇文档的段落解析缓存。"""
+    f = _cache_dir() / f"{_doc_id(file_path)}.json"
+    if f.exists():
+        f.unlink()
+
+
+# ========== 逐页解析缓存（Stage 1） ==========
+
+def get_page_cache_dir(pdf_path: str) -> Path:
+    """获取逐页缓存目录路径：.pdfasker/page_cache/{pdf_md5}/"""
+    config = load_config()
+    d = _resolve_data_dir(config) / "page_cache" / _doc_id(pdf_path)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def load_page_cache(pdf_path: str, page_num: int) -> dict | None:
+    """加载指定页的解析缓存。"""
+    f = get_page_cache_dir(pdf_path) / f"page_{page_num:03d}.json"
+    if not f.exists():
+        return None
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def save_page_cache(pdf_path: str, page_num: int, data: dict) -> None:
+    """保存指定页的解析缓存。"""
+    d = get_page_cache_dir(pdf_path)
+    f = d / f"page_{page_num:03d}.json"
+    f.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_page_manifest(pdf_path: str) -> dict | None:
+    """加载页面缓存清单。"""
+    f = get_page_cache_dir(pdf_path) / "_manifest.json"
+    if not f.exists():
+        return None
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def save_page_manifest(pdf_path: str, manifest: dict) -> None:
+    """保存页面缓存清单。"""
+    d = get_page_cache_dir(pdf_path)
+    f = d / "_manifest.json"
+    f.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def delete_page_cache(pdf_path: str) -> None:
+    """删除某篇文档的全部逐页缓存。"""
+    import shutil
+    d = get_page_cache_dir(pdf_path)
+    if d.exists():
+        shutil.rmtree(str(d))

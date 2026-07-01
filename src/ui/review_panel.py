@@ -3,6 +3,7 @@
 """
 
 import os
+import re
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton,
     QScrollArea, QLabel, QFrame, QSplitter, QProgressBar,
@@ -223,6 +224,7 @@ class ReviewPanel(QWidget):
         self._last_result: ReviewCheckResult | None = None
         self._llm_chat = None     # 聊天客户端（用于核查后追问）
         self._follow_chat_history: list[dict] = []  # 追问对话历史
+        self._scroll_syncing = False  # 左右同步滚动锁
         self._setup_ui()
 
     def set_zotero_library(self, zotero: ZoteroLibrary):
@@ -325,78 +327,70 @@ class ReviewPanel(QWidget):
         sep.setStyleSheet("background-color: #2a2c3d; max-height: 1px;")
         main_layout.addWidget(sep)
 
-        # ---- 主内容区（上下分割：写作区 / 结果区）----
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setHandleWidth(3)
+        # ---- 编辑区（紧凑） ----
+        edit_section = QVBoxLayout()
+        edit_section.setContentsMargins(12, 6, 12, 6)
+        edit_section.setSpacing(4)
 
-        # ===== 写作区 =====
-        write_widget = QWidget()
-        write_layout = QVBoxLayout(write_widget)
-        write_layout.setContentsMargins(0, 0, 0, 0)
-        write_layout.setSpacing(6)
-
-        # 写作工具栏
-        write_toolbar = QHBoxLayout()
-        write_toolbar.setContentsMargins(12, 4, 12, 4)
-
-        write_hint = QLabel("在此编写或粘贴综述草稿（支持 Markdown）")
+        edit_toolbar = QHBoxLayout()
+        edit_toolbar.setSpacing(6)
+        write_hint = QLabel("在此编写或粘贴综述草稿")
         write_hint.setStyleSheet("color: #9599b5; font-size: 12px;")
-        write_toolbar.addWidget(write_hint)
-        write_toolbar.addStretch()
+        edit_toolbar.addWidget(write_hint)
+        edit_toolbar.addStretch()
 
         self.search_btn = QPushButton("🔍 搜索相关文献")
         self.search_btn.setToolTip("根据综述主题在文献库中搜索可能遗漏的文献")
         self.search_btn.clicked.connect(self._on_search_library)
-        write_toolbar.addWidget(self.search_btn)
+        edit_toolbar.addWidget(self.search_btn)
 
         self.check_btn = QPushButton("✨ AI 辅助修改")
         self.check_btn.setObjectName("primaryBtn")
         self.check_btn.setToolTip("让 AI 对照真实文献，帮你优化综述内容")
         self.check_btn.clicked.connect(self._on_check_review)
-        write_toolbar.addWidget(self.check_btn)
+        edit_toolbar.addWidget(self.check_btn)
+        edit_section.addLayout(edit_toolbar)
 
-        write_layout.addLayout(write_toolbar)
-
-        # 综述文本编辑器
+        # 综述文本编辑器（紧凑高度）
         self.review_editor = QTextEdit()
         self.review_editor.setPlaceholderText(
-            "在此编写你的综述草稿...\n\n"
-            "💡 使用方式：\n"
-            "• 使用 [1]、[2] 或 (Author, Year) 等格式标注引用\n"
-            "• 引用的文献需已导入 Zotero 并附有 PDF\n"
-            "• 点击「✨ AI 辅助修改」让 AI 对照原文帮你优化\n"
-            "• 点击「🔍 搜索相关文献」查找可能遗漏的重要文献"
+            "在此编写综述草稿… 使用 [1] 或 (Author, Year) 标注引用"
         )
         self.review_editor.setStyleSheet(
             "QTextEdit { background-color: #24253a; color: #e2e5f2; border: 1px solid #3b3d54; "
-            "border-radius: 8px; padding: 12px; font-size: 14px; line-height: 1.6; }"
+            "border-radius: 8px; padding: 10px; font-size: 13px; line-height: 1.5; }"
         )
-        write_layout.addWidget(self.review_editor, 1)
+        self.review_editor.setMaximumHeight(160)
+        self.review_editor.setMinimumHeight(80)
+        edit_section.addWidget(self.review_editor)
 
         # 进度条
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(8)
         self.progress_bar = QProgressBar()
-        self.progress_bar.setMaximumHeight(4)
+        self.progress_bar.setMaximumHeight(3)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setVisible(False)
         self.progress_bar.setStyleSheet(
             "QProgressBar { background-color: #24253a; border: none; border-radius: 2px; }"
             "QProgressBar::chunk { background-color: #7aa2f7; border-radius: 2px; }"
         )
-        write_layout.addWidget(self.progress_bar)
-
+        progress_row.addWidget(self.progress_bar, 1)
         self.progress_label = QLabel("")
-        self.progress_label.setStyleSheet("color: #9599b5; font-size: 11px; padding: 0 12px;")
+        self.progress_label.setStyleSheet("color: #9599b5; font-size: 11px;")
         self.progress_label.setVisible(False)
-        write_layout.addWidget(self.progress_label)
+        progress_row.addWidget(self.progress_label)
+        edit_section.addLayout(progress_row)
 
-        splitter.addWidget(write_widget)
+        main_layout.addLayout(edit_section)
 
-        # ===== 结果区 =====
-        result_widget = QWidget()
-        result_layout = QVBoxLayout(result_widget)
-        result_layout.setContentsMargins(0, 0, 0, 0)
-        result_layout.setSpacing(0)
+        # ---- 分隔线 ----
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("background-color: #2a2c3d; max-height: 1px;")
+        main_layout.addWidget(sep2)
 
+        # ===== 结果区：左右对照 =====
         result_header = QHBoxLayout()
         result_header.setContentsMargins(12, 6, 12, 6)
         result_title = QLabel("📊 修改建议")
@@ -406,68 +400,92 @@ class ReviewPanel(QWidget):
         self.result_count = QLabel("")
         self.result_count.setStyleSheet("color: #9599b5; font-size: 12px;")
         result_header.addWidget(self.result_count)
-        result_layout.addLayout(result_header)
+        main_layout.addLayout(result_header)
 
-        # 结果滚动区域
-        self.result_scroll = QScrollArea()
-        self.result_scroll.setWidgetResizable(True)
-        self.result_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.result_scroll.setStyleSheet("QScrollArea { background-color: #1a1b26; border: none; }")
+        # 左右分割器（原文 | AI 反馈）
+        self.compare_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.compare_splitter.setHandleWidth(3)
 
-        self.result_container = QWidget()
-        self.result_container.setStyleSheet("background-color: #1a1b26;")
-        self.result_card_layout = QVBoxLayout(self.result_container)
-        self.result_card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.result_card_layout.setSpacing(4)
-        self.result_card_layout.setContentsMargins(8, 4, 8, 12)
-
-        self.result_placeholder = QLabel(
-            "📋 AI 修改建议将显示在这里\n\n"
-            "操作步骤：\n"
-            "1. 设置 Zotero 文献库目录\n"
-            "2. 在上方编写综述草稿\n"
-            "3. 点击「✨ AI 辅助修改」\n"
-            "4. AI 将对照原文给出改写建议\n"
-            "5. 在下方追问框进一步沟通"
+        # ---- 左：原文 ----
+        left_frame = QFrame()
+        left_frame.setStyleSheet("QFrame { background-color: #1a1b26; border: none; }")
+        left_layout = QVBoxLayout(left_frame)
+        left_layout.setContentsMargins(4, 4, 2, 4)
+        left_layout.setSpacing(4)
+        left_header = QLabel("📝 你的原文")
+        left_header.setStyleSheet("color: #8a8ea6; font-size: 12px; font-weight: bold; padding: 4px 8px;")
+        left_layout.addWidget(left_header)
+        self.original_view = QTextEdit()
+        self.original_view.setReadOnly(True)
+        self.original_view.setStyleSheet(
+            "QTextEdit { background-color: #1e2030; color: #cfd2e3; border: 1px solid #3b3d54; "
+            "border-radius: 8px; padding: 10px; font-size: 13px; line-height: 1.7; }"
         )
-        self.result_placeholder.setWordWrap(True)
-        self.result_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.result_placeholder.setStyleSheet("color: #636688; padding: 40px 20px; font-size: 13px;")
-        self.result_card_layout.addWidget(self.result_placeholder)
+        left_layout.addWidget(self.original_view, 1)
+        self.compare_splitter.addWidget(left_frame)
 
-        self.result_scroll.setWidget(self.result_container)
-        result_layout.addWidget(self.result_scroll, 1)
+        # ---- 右：AI 反馈 ----
+        right_frame = QFrame()
+        right_frame.setStyleSheet("QFrame { background-color: #1a1b26; border: none; }")
+        right_layout = QVBoxLayout(right_frame)
+        right_layout.setContentsMargins(2, 4, 4, 4)
+        right_layout.setSpacing(4)
+        right_header = QLabel("✨ AI 修改建议")
+        right_header.setStyleSheet("color: #7aa2f7; font-size: 12px; font-weight: bold; padding: 4px 8px;")
+        right_layout.addWidget(right_header)
+        self.feedback_view = QTextEdit()
+        self.feedback_view.setReadOnly(True)
+        self.feedback_view.setStyleSheet(
+            "QTextEdit { background-color: #1e2030; color: #e2e5f2; border: 1px solid #7aa2f7; "
+            "border-radius: 8px; padding: 10px; font-size: 13px; line-height: 1.7; }"
+        )
+        right_layout.addWidget(self.feedback_view, 1)
+        self.compare_splitter.addWidget(right_frame)
 
-        # 追问聊天区（初始隐藏聊天显示，只展示输入框）
+        self.compare_splitter.setSizes([400, 500])
+        self.compare_splitter.setStretchFactor(0, 1)
+        self.compare_splitter.setStretchFactor(1, 1)
+
+        # 同步滚动
+        self.original_view.verticalScrollBar().valueChanged.connect(
+            self._sync_scroll_left_to_right
+        )
+        self.feedback_view.verticalScrollBar().valueChanged.connect(
+            self._sync_scroll_right_to_left
+        )
+        self._scroll_syncing = False  # 防止递归
+
+        main_layout.addWidget(self.compare_splitter, 1)
+
+        # ---- 追问区 ----
         self.follow_chat_group = QGroupBox("💬 追问与修正")
         self.follow_chat_group.setVisible(False)
+        self.follow_chat_group.setMaximumHeight(150)
         fcl = QVBoxLayout(self.follow_chat_group)
         fcl.setContentsMargins(8, 8, 8, 8)
         fcl.setSpacing(6)
 
-        # 聊天历史显示（初始隐藏，发送第一条消息后才显示，大小可调）
         self.follow_chat_display = QTextEdit()
         self.follow_chat_display.setReadOnly(True)
-        self.follow_chat_display.setMinimumHeight(60)
+        self.follow_chat_display.setMinimumHeight(40)
         self.follow_chat_display.setVisible(False)
         self.follow_chat_display.setStyleSheet(
             "QTextEdit { background-color: #161720; color: #cfd2e3; border: 1px solid #2a2c3d; "
             "border-radius: 6px; padding: 8px; font-size: 12px; }"
         )
-        fcl.addWidget(self.follow_chat_display, 1)  # stretch factor 1 使其可拉伸
+        fcl.addWidget(self.follow_chat_display, 1)
 
-        # 追问输入行
         fcw = QHBoxLayout()
         fcw.setSpacing(6)
         self.follow_chat_input = QTextEdit()
         self.follow_chat_input.setPlaceholderText("与 AI 讨论修改方案... 按 Ctrl+Enter 发送")
-        self.follow_chat_input.setMaximumHeight(48)
-        self.follow_chat_input.setMinimumHeight(36)
+        self.follow_chat_input.setMaximumHeight(44)
+        self.follow_chat_input.setMinimumHeight(32)
         self.follow_chat_input.setStyleSheet(
             "QTextEdit { background-color: #24253a; color: #e2e5f2; border: 1px solid #3b3d54; "
             "border-radius: 6px; padding: 6px 10px; font-size: 13px; }"
         )
-        self.follow_chat_input.installEventFilter(self)  # Ctrl+Enter 快捷键
+        self.follow_chat_input.installEventFilter(self)
         fcw.addWidget(self.follow_chat_input, 1)
         self.follow_send_btn = QPushButton("发送")
         self.follow_send_btn.setObjectName("primaryBtn")
@@ -476,14 +494,31 @@ class ReviewPanel(QWidget):
         fcw.addWidget(self.follow_send_btn)
         fcl.addLayout(fcw)
 
-        result_layout.addWidget(self.follow_chat_group)
+        main_layout.addWidget(self.follow_chat_group)
 
-        splitter.addWidget(result_widget)
-        splitter.setSizes([300, 500])
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
+    def _sync_scroll_left_to_right(self, value: int):
+        """左→右同步滚动"""
+        if self._scroll_syncing:
+            return
+        self._scroll_syncing = True
+        left_max = self.original_view.verticalScrollBar().maximum()
+        right_max = self.feedback_view.verticalScrollBar().maximum()
+        if left_max > 0:
+            ratio = value / left_max
+            self.feedback_view.verticalScrollBar().setValue(int(ratio * right_max))
+        self._scroll_syncing = False
 
-        main_layout.addWidget(splitter, 1)
+    def _sync_scroll_right_to_left(self, value: int):
+        """右→左同步滚动"""
+        if self._scroll_syncing:
+            return
+        self._scroll_syncing = True
+        right_max = self.feedback_view.verticalScrollBar().maximum()
+        left_max = self.original_view.verticalScrollBar().maximum()
+        if right_max > 0:
+            ratio = value / right_max
+            self.original_view.verticalScrollBar().setValue(int(ratio * left_max))
+        self._scroll_syncing = False
 
     # ========== 事件处理 ==========
 
@@ -631,77 +666,132 @@ class ReviewPanel(QWidget):
 
     def _clear_results(self):
         """清除之前的结果"""
-        while self.result_card_layout.count():
-            item = self.result_card_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self.result_placeholder = None
+        self.original_view.clear()
+        self.feedback_view.clear()
         self.follow_chat_group.setVisible(False)
         self.follow_chat_display.clear()
         self._follow_chat_history = []
         self.result_count.setText("")
+        self.compare_splitter.setVisible(True)
 
     def _render_results(self, result: ReviewCheckResult):
-        """渲染核查结果"""
+        """渲染核查结果 —— 左边原文，右边 AI 反馈"""
         self._clear_results()
 
+        review_text = self.review_editor.toPlainText().strip()
         claims = result.claims
-        if not claims:
-            placeholder = QLabel("✅ 未检测到带引用的声明。")
-            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            placeholder.setStyleSheet("color: #9ece6a; padding: 20px; font-size: 13px;")
-            self.result_card_layout.addWidget(placeholder)
-            return
 
-        # 统计
-        good = sum(1 for c in claims if c.status == "引用恰当")
-        supplement = sum(1 for c in claims if c.status == "建议补充")
-        improve = sum(1 for c in claims if c.status == "表述可优化")
-        verify = sum(1 for c in claims if c.status == "需核实")
-        missing = sum(1 for c in claims if c.status == "文献未匹配")
+        # ---- 左：原文 ----
+        self.original_view.setPlainText(review_text)
 
-        self.result_count.setText(
-            f"共 {len(claims)} 条 | ✅{good} 📝{supplement} 💡{improve} ⚠️{verify} ❓{missing}"
-        )
+        # ---- 右：AI 反馈（HTML 格式，重点高亮） ----
+        html_parts = []
 
-        # 先显示汇总
-        summary = QLabel(
-            f"分析完成：共检测到 {len(claims)} 条引文声明。\n"
-            f"✅ 引用恰当：{good} 条 | 📝 建议补充：{supplement} 条 | "
-            f"💡 表述可优化：{improve} 条 | ❓ 文献未匹配：{missing} 条"
-        )
-        summary.setWordWrap(True)
-        summary.setStyleSheet("color: #cfd2e3; padding: 8px 12px; font-size: 13px; font-weight: bold;")
-        self.result_card_layout.addWidget(summary)
+        # 统计摘要
+        if claims:
+            good = sum(1 for c in claims if c.status == "引用恰当")
+            supplement = sum(1 for c in claims if c.status == "建议补充")
+            improve = sum(1 for c in claims if c.status == "表述可优化")
+            verify = sum(1 for c in claims if c.status == "需核实")
+            missing = sum(1 for c in claims if c.status == "文献未匹配")
 
-        # 逐条渲染
-        for claim in claims:
-            card = ClaimResultCard(claim)
-            self.result_card_layout.addWidget(card)
-
-        self.result_card_layout.addStretch()
-
-        # 整体修改方案（渲染为卡片，在滚动区域内）
-        if result.overall_assessment:
-            overall_card = QFrame()
-            overall_card.setStyleSheet(
-                "QFrame { background-color: #1e2030; border: 1px solid #7aa2f7; "
-                "border-radius: 10px; margin: 8px 4px; }"
+            self.result_count.setText(
+                f"共 {len(claims)} 条 | ✅{good} 📝{supplement} 💡{improve} ⚠️{verify} ❓{missing}"
             )
-            ol = QVBoxLayout(overall_card)
-            ol.setContentsMargins(16, 14, 16, 14)
-            ol.setSpacing(8)
-            oh = QLabel("📋 整体修改方案")
-            oh.setStyleSheet("color: #7aa2f7; font-size: 14px; font-weight: bold;")
-            ol.addWidget(oh)
-            ot = QLabel(result.overall_assessment)
-            ot.setWordWrap(True)
-            ot.setStyleSheet("color: #cfd2e3; font-size: 13px; line-height: 1.8;")
-            ot.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            ol.addWidget(ot)
-            self.result_card_layout.addWidget(overall_card)
 
-        self.result_card_layout.addStretch()
+            html_parts.append(
+                f'<div style="margin-bottom:16px; padding:12px; background-color:#1e2035; '
+                f'border-radius:8px; border-left:3px solid #7aa2f7;">'
+                f'<b style="color:#7aa2f7; font-size:14px;">📊 引文核查结果</b><br>'
+                f'<span style="color:#cfd2e3;">共 {len(claims)} 条 | '
+                f'<span style="color:#9ece6a;">✅{good} 恰当</span> | '
+                f'<span style="color:#7aa2f7;">📝{supplement} 建议补充</span> | '
+                f'<span style="color:#e0af68;">💡{improve} 可优化</span> | '
+                f'<span style="color:#f7768e;">⚠️{verify} 需核实</span> | '
+                f'<span style="color:#9599b5;">❓{missing} 未匹配</span></span>'
+                f'</div>'
+            )
+
+            # 逐条引文核查结果
+            for claim in claims:
+                icon_color = {
+                    "引用恰当": ("✅", "#9ece6a"),
+                    "建议补充": ("📝", "#7aa2f7"),
+                    "表述可优化": ("💡", "#e0af68"),
+                    "需核实": ("⚠️", "#f7768e"),
+                    "文献未匹配": ("❓", "#9599b5"),
+                }.get(claim.status, ("❓", "#9599b5"))
+
+                matched_info = ""
+                if claim.matched_item:
+                    matched_info = f' → <i>{claim.matched_item.title[:60]}...</i>'
+
+                # 提取诊断
+                diag = ""
+                diag_m = re.search(r'\*\*诊断\*\*\s*[：:]\s*(.+?)(?:\n|$)', claim.ai_feedback)
+                if diag_m:
+                    diag = diag_m.group(1).strip()
+
+                fix_text = ""
+                fix_m = re.search(r'\*\*需核实/修正的内容\*\*\s*[：:]\s*(.+?)(?:\n\n\*\*|\Z)', claim.ai_feedback, re.DOTALL)
+                if fix_m and fix_m.group(1).strip() not in ("无", "无。", "N/A", "-"):
+                    fix_text = fix_m.group(1).strip()[:300]
+
+                wording = ""
+                wording_m = re.search(r'\*\*措辞微调\*\*\s*[：:]\s*(.+?)(?:\n\n\*\*|\Z)', claim.ai_feedback, re.DOTALL)
+                if wording_m and wording_m.group(1).strip() not in ("无", "无。", "N/A", "-"):
+                    wording = wording_m.group(1).strip()[:200]
+
+                html_parts.append(
+                    f'<div style="margin-bottom:10px; padding:10px 12px; '
+                    f'background-color:#1e2030; border-radius:8px; '
+                    f'border-left:3px solid {icon_color[1]};">'
+                    f'<b style="color:{icon_color[1]};">{icon_color[0]} {claim.status}</b>'
+                    f'<span style="color:#7aa2f7;"> [{claim.citation_marker}]</span>'
+                    f'{matched_info}<br>'
+                    f'<span style="color:#cfd2e3; font-size:12px;">📝 <b>综述原文：</b>'
+                    f'{claim.claim_text[:200]}...</span><br>'
+                )
+                if diag:
+                    html_parts.append(
+                        f'<span style="color:#a9b1d6; font-size:12px;">🔍 {diag}</span><br>'
+                    )
+                if fix_text:
+                    html_parts.append(
+                        f'<span style="color:#f7768e; font-size:12px;">'
+                        f'<b>⚠️ 需核实：</b>{fix_text}</span><br>'
+                    )
+                if wording:
+                    html_parts.append(
+                        f'<span style="color:#e0af68; font-size:12px;">'
+                        f'<b>💡 措辞建议：</b>{wording}</span><br>'
+                    )
+                html_parts.append('</div>')
+
+        # 整体核查意见（核心内容，重点展示）
+        if result.overall_assessment:
+            # 将 markdown 风格的粗体转为 HTML
+            assessment = result.overall_assessment
+            assessment = assessment.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            assessment = re.sub(r'\*\*(.+?)\*\*', r'<b style="color:#7aa2f7;">\1</b>', assessment)
+            assessment = assessment.replace("\n", "<br>")
+
+            html_parts.append(
+                f'<div style="margin-top:8px; padding:14px; background-color:#1e2035; '
+                f'border-radius:8px; border:1px solid #7aa2f7;">'
+                f'<b style="color:#7aa2f7; font-size:15px;">📋 整体核查意见</b><br><br>'
+                f'<span style="color:#e2e5f2; font-size:13px; line-height:1.8;">'
+                f'{assessment}</span>'
+                f'</div>'
+            )
+
+        if not html_parts:
+            html_parts.append(
+                '<div style="color:#9ece6a; padding:40px; text-align:center; font-size:14px;">'
+                '✅ 未检测到带引用的声明</div>'
+            )
+
+        self.feedback_view.setHtml("".join(html_parts))
 
         # 显示追问聊天区
         self.follow_chat_group.setVisible(True)

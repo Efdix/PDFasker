@@ -66,8 +66,8 @@ class ReviewChecker:
 综述文本：
 {review_text}"""
 
-    # 对照原文给出改写建议（核心 prompt）
-    REWRITE_PROMPT = """你是一位资深的学术写作导师。你的任务是对照原始论文，帮助作者改进综述中的这一段文字。
+    # 对照原文给出核查建议（核心 prompt）—— 聚焦事实准确性，不做逐句扩写
+    REWRITE_PROMPT = """你是一位学术审稿人。你的任务是核实综述中的这句话是否准确反映了原文。
 
 【原始论文相关内容】
 {source_context}
@@ -75,50 +75,67 @@ class ReviewChecker:
 【综述中的当前写法】
 {claim_text}
 
-请从以下角度给出具体可操作的修改建议：
+请从以下角度简要评估（保持简洁，每条1-2句话即可）：
 
-1. **内容完整性**：综述是否遗漏了原文中的重要发现、关键数据或核心结论？如果有，请指出应补充什么。
-2. **表述精准度**：综述的表述是否准确反映了原文的意思？有没有可以更精确的措辞？
-3. **引用增强**：这段综述是否充分利用了这篇文献的价值？原文中还有哪些观点可以用来丰富这一段？
-4. **逻辑衔接**：如果这段前后文有逻辑跳跃，请建议如何添加过渡句。
+1. **事实准确性**：综述的表述是否与原文一致？有没有与原文矛盾或明显曲解之处？
+2. **关键遗漏**：原文中有无对理解该研究至关重要的发现/数据/结论，而综述未提及？只列确实关键的，不必面面俱到。
+3. **措辞建议**：如果有表述不够精准的地方，给出更准确的措辞建议（只改有问题的词句，不要整段改写）。
+
+重要原则：
+- 综述应简洁、概括，不需要复述原文所有细节。只指出真正的问题。
+- 如果综述表述基本准确，直接说"表述准确，无需修改"即可。
+- 不要对综述进行扩写或润色，保持综述应有的简练风格。
 
 请按以下格式回答：
-**诊断**：[用 1-2 句概括这段综述与原文的关系]
-**可补充的内容**：[原文中有但综述未提及的重要信息，用列表]
-**建议改写的版本**：[给出一个改写后的段落示例，保持学术风格，字数与原文相当。如果原文已经很好，写"原文已较好，无需大幅修改"即可]
-**关键词提示**：[列出原文中的 3-5 个关键技术术语/概念，作者可考虑在综述中使用]"""
+**诊断**：[用1句话判断：准确/基本准确但有遗漏/存在不准确之处]
+**需核实/修正的内容**：[如有事实偏差，指出具体问题；如无，写"无"]
+**关键遗漏**：[如有重要遗漏，简要列出；如无，写"无"]
+**措辞微调**：[如有措辞可优化，给出原词→建议词；如无，写"无"]"""
 
-    # 整体修改与改写
-    OVERALL_PROMPT = """你是一位学术论文润色专家。请对以下综述草稿进行整体改写和优化。
+    # 整体核查与建议 —— 从整体视角评估综述，不做逐句改写
+    OVERALL_PROMPT = """你是一位学术审稿人。请从整体视角审视以下综述草稿，关注结构和逻辑而非逐句措辞。
 
 【综述全文】
 {review_text}
 
-【各引文逐条分析汇总】
+【各引文核查汇总】
 {verification_summary}
 
-## 改写要求
+## 评估要点
 
-### 1. 语言风格
-- 专业、简练、平实、客观，避免夸张和口语化表达
-- 使用学术论文的标准行文方式，术语准确、句式严谨
-- 删除冗余表述，但保留必要的限定词（如"可能""在大多数情况下"等体现学术严谨性的措辞）
+### 1. 逻辑结构
+- 综述的整体框架是否合理（如：领域背景→关键问题→主要进展→现存争议→未来方向）？
+- 段落之间的逻辑推进是否清晰？是否存在明显的跳跃或断裂？
+- 如有结构问题，请指出具体位置并给出调整建议。
 
-### 2. 引用核查与补充
-- 每条分析中标记为「建议补充」「表述可优化」的引用声明，对照原文反馈修正表述
-- 标记为「文献未匹配」的，如所述内容为学术界共识可保留，否则标注为待核实
-- 根据综述涉及的研究主题，判断现有引用是否覆盖了关键文献；如发现明显遗漏的重要研究方向或经典文献，在文末以注释形式列出建议补充的文献（格式：作者, 年份, 标题关键词, 建议引用理由, 一句话）
+### 2. 事实准确性
+- 根据各引文的核查结果，汇总存在事实偏差的表述。
+- 只关注确实有问题的部分，表述基本准确的无需列出。
 
-### 3. 过渡与衔接
-- 检查句子之间的逻辑关系，必要时添加连接词或过渡句
-- 确保段落之间有清晰的逻辑推进（如：问题→方法→进展→不足→展望）
-- 小节之间如有跳跃，补写 1-2 句承上启下的过渡语句
+### 3. 文献覆盖度
+- 现有引用是否覆盖了该领域的关键文献？
+- 如发现明显遗漏的重要研究方向或经典文献，简要列出（格式：作者, 年份, 简述, 建议引用理由）。
+
+### 4. 综述风格
+- 综述是否保持了简洁、概括的学术风格？
+- 如有过于冗长或偏离综述主旨的段落，请指出。
 
 ## 输出格式
 
-请直接输出改写后的完整综述全文，不要输出修改说明或评价。字数与原文大致相当或略增。
+请直接输出以下内容（不要输出完整改写稿）：
 
-在改写稿末尾，另起一行用 `---` 分隔，然后以列表形式给出「建议补充引用」和「主要修改说明」（各不超过 5 条，每条一句话）。"""
+**结构建议**：[2-4条关于段落结构/逻辑推进的调整建议]
+
+**事实问题**：[列出确实存在的事实偏差，标出原文位置。如无问题写"未发现明显事实偏差"]
+
+**遗漏文献**：[建议补充的关键文献。如无需补充写"现有引用覆盖较全面"]
+
+**风格提醒**：[如有风格问题简要指出。如无写"综述风格恰当"]
+
+重要原则：
+- 综述是高度概括的文体，不要建议扩写或添加过多细节。
+- 文献是参考依据而非改写模板，不要用原文去"纠正"综述的概括性表述。
+- 尊重作者的行文风格，只在确实有问题时才提出建议。"""
 
     # 常见停用词
     _STOP_WORDS: frozenset[str] = frozenset({
@@ -292,28 +309,30 @@ class ReviewChecker:
                 response = self._llm.chat_sync([{"role": "user", "content": prompt}])
                 claim.ai_feedback = response
 
-                # 提取诊断
+                # 提取诊断（新格式：准确/基本准确但有遗漏/存在不准确之处）
                 diag_match = re.search(r'\*\*诊断\*\*\s*[：:]\s*(.+?)(?:\n\n|\n\*\*)', response, re.DOTALL)
                 diagnosis = diag_match.group(1).strip() if diag_match else ""
 
                 # 根据诊断内容推断状态
                 diag_lower = diagnosis.lower()
-                if any(w in diag_lower for w in ['遗漏', '未提及', '缺少', '补充', '还应']):
+                if any(w in diag_lower for w in ['不准确', '存在不准确', '偏差', '有误', '矛盾']):
+                    claim.status = "需核实"
+                elif any(w in diag_lower for w in ['遗漏', '未提及', '缺少']):
                     claim.status = "建议补充"
-                elif any(w in diag_lower for w in ['不够准确', '可优化', '可改进', '调整', '措辞']):
-                    claim.status = "表述可优化"
-                elif any(w in diag_lower for w in ['基本准确', '较好', '一致', '原文已较好']):
+                elif any(w in diag_lower for w in ['基本准确', '准确', '无需修改', '较好']):
                     claim.status = "引用恰当"
                 else:
                     claim.status = "引用恰当"  # 默认
 
-                # 提取改写建议
+                # 提取措辞微调建议（新格式：**措辞微调**）
                 sug_match = re.search(
-                    r'\*\*建议改写的版本\*\*\s*[：:]\s*(.+?)(?:\n\n\*\*|\Z)',
+                    r'\*\*措辞微调\*\*\s*[：:]\s*(.+?)(?:\n\n\*\*|\Z)',
                     response, re.DOTALL
                 )
-                if sug_match:
+                if sug_match and sug_match.group(1).strip() not in ("无", "无。", "N/A", "-"):
                     claim.rewrite_suggestion = sug_match.group(1).strip()
+                else:
+                    claim.rewrite_suggestion = ""
 
         except Exception as e:
             claim.status = "需核实"
@@ -369,7 +388,7 @@ class ReviewChecker:
         return full_text[:half] + "\n\n...\n\n" + full_text[-half:]
 
     def _generate_overall(self, review_text: str, claims: list[CitationClaim]) -> str:
-        """生成整体改写稿"""
+        """生成整体核查意见（结构建议 + 事实问题汇总，不做逐句改写）"""
         summary_parts = []
         for claim in claims:
             icon = {
@@ -377,16 +396,18 @@ class ReviewChecker:
                 "需核实": "⚠️", "文献未匹配": "❓"
             }.get(claim.status, "❓")
             matched_title = claim.matched_item.title[:60] if claim.matched_item else "未匹配"
-            # 截取 AI 反馈中关键部分（诊断 + 可补充内容）
-            feedback_brief = claim.ai_feedback
-            if len(feedback_brief) > 300:
-                # 尝试取诊断行
-                diag_match = re.search(r'\*\*诊断\*\*[：:]\s*(.+?)(?:\n|$)', feedback_brief)
-                feedback_brief = (diag_match.group(1) if diag_match else feedback_brief[:300]) + "..."
+            # 提取诊断行和需核实的内容
+            diag_match = re.search(r'\*\*诊断\*\*\s*[：:]\s*(.+?)(?:\n|$)', claim.ai_feedback)
+            diag_text = diag_match.group(1).strip() if diag_match else claim.ai_feedback[:150]
+            # 也提取需核实/修正的内容
+            fix_match = re.search(r'\*\*需核实/修正的内容\*\*\s*[：:]\s*(.+?)(?:\n\n\*\*|\Z)', claim.ai_feedback, re.DOTALL)
+            fix_text = ""
+            if fix_match and fix_match.group(1).strip() not in ("无", "无。", "N/A", "-"):
+                fix_text = f" → {fix_match.group(1).strip()[:200]}"
             summary_parts.append(
                 f"{icon} [{claim.status}] {claim.citation_marker} → {matched_title}\n"
-                f"   综述原文：{claim.claim_text[:200]}...\n"
-                f"   诊断：{feedback_brief}\n"
+                f"   综述原文：{claim.claim_text[:150]}...\n"
+                f"   诊断：{diag_text}{fix_text}\n"
             )
 
         verification_summary = "\n".join(summary_parts)
