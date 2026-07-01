@@ -4,21 +4,32 @@ from __future__ import annotations
 
 
 class ContextManager:
-    """管理 PDF 文本和对话上下文，按 token 预算自动截断。"""
+    """管理 PDF 文本和对话上下文，按 token 预算自动截断。
+
+    支持两套上下文：
+    - 纯文本模式（兼容旧版）：只拼接 display_elements 的 text
+    - 结构化模式（新版）：额外拼接 metadata_pool / figures / references
+    """
 
     CHARS_PER_TOKEN = 2  # 保守估算：中英文混合约 2 字符 ≈ 1 token
 
     def __init__(self, max_tokens: int = 1_000_000) -> None:
         self.max_tokens = max_tokens
         self._pdf_text: str = ""
+        self._structured_doc: object | None = None  # StructuredDocument
         self._chat_history: list[dict] = []
 
     # ---- 公共 API ----
 
     def load_pdf_text(self, text: str) -> None:
-        """加载新 PDF 文本，同时清空历史对话。"""
+        """加载新 PDF 纯文本，同时清空历史对话。"""
         self._pdf_text = text
+        self._structured_doc = None
         self._chat_history.clear()
+
+    def load_structured_doc(self, doc: object) -> None:
+        """加载结构化文档 —— 聊天时可引用 metadata/figures/references 等完整信息。"""
+        self._structured_doc = doc
 
     def load_history(self, history: list[dict]) -> None:
         """从持久化存储恢复对话历史。"""
@@ -30,13 +41,13 @@ class ContextManager:
 
     @property
     def has_pdf(self) -> bool:
-        """是否已加载 PDF 文本。"""
-        return bool(self._pdf_text)
+        """是否已加载 PDF 文本或结构化文档。"""
+        return bool(self._pdf_text) or self._structured_doc is not None
 
     def get_full_context_for_estimation(self) -> str:
         """返回 PDF 全文 + 对话历史用于 token 估算。"""
         history_text = "".join(m["content"] for m in self._chat_history)
-        return self._pdf_text + history_text
+        return self._build_full_context() + history_text
 
     def estimate_tokens(self, text: str) -> int:
         """粗略估算文本占用的 token 数。"""
@@ -53,7 +64,7 @@ class ContextManager:
     def build_messages(self, user_query: str) -> list[dict]:
         """构建发送给 LLM 的完整消息列表，超出 token 预算时自动截断。
 
-        优先级：system prompt → PDF 内容（头尾保留） → 近期对话历史 → 当前问题。
+        上下文拼接顺序：system prompt → 论文正文 → 元信息 → 图表描述 → 参考文献 → 对话历史 → 当前问题。
         """
         system_prompt = self._build_system_prompt()
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -62,7 +73,9 @@ class ContextManager:
         used = self.estimate_tokens(system_prompt) + self.estimate_tokens(user_query)
         budget = self.max_tokens - used - 4000
 
-        pdf_section = self._truncate_text(self._pdf_text, budget)
+        # 构建完整上下文
+        full_context = self._build_full_context()
+        pdf_section = self._truncate_text(full_context, budget)
         messages.append({"role": "user", "content": pdf_section})
 
         history_budget = budget - self.estimate_tokens(pdf_section)
@@ -73,6 +86,60 @@ class ContextManager:
 
     # ---- 内部方法 ----
 
+    def _build_full_context(self) -> str:
+        """构建完整的论文上下文：正文 + 元信息 + 图表 + 参考文献。"""
+        parts = []
+
+        # 正文部分（纯文本或 display_elements）
+        if self._pdf_text:
+            parts.append("【论文正文】\n" + self._pdf_text)
+        elif self._structured_doc is not None:
+            doc = self._structured_doc
+            display_text = "\n\n".join(
+                e.text for e in doc.display_elements
+                if e.text and e.element_type not in ("header_footer", "publisher_logo")
+            )
+            if display_text:
+                parts.append("【论文正文】\n" + display_text)
+
+        # 元信息（作者、单位、出版信息等）
+        if self._structured_doc is not None:
+            doc = self._structured_doc
+            if doc.metadata_pool:
+                meta_text = "\n".join(
+                    f"[{e.element_type}] {e.text}"
+                    for e in doc.metadata_pool if e.text
+                )
+                if meta_text:
+                    parts.append("【元信息（作者/出版信息）】\n" + meta_text)
+
+            # 图表描述
+            if doc.figures:
+                fig_text = "\n".join(
+                    f"图{element_id}: {caption} — {desc}"
+                    for f in doc.figures
+                    for element_id, caption, desc in [
+                        (f.element_id, f.image_caption or "", f.image_description or "")
+                    ]
+                    if caption or desc
+                )
+                if fig_text:
+                    parts.append("【图表描述】\n" + fig_text)
+
+            # 参考文献
+            if doc.references:
+                ref_text = "\n".join(
+                    f"[{i+1}] {r.text}"
+                    for i, r in enumerate(doc.references) if r.text
+                )
+                if ref_text:
+                    parts.append("【参考文献】\n" + ref_text)
+
+        if not parts:
+            return self._pdf_text or ""
+
+        return "\n\n".join(parts)
+
     @staticmethod
     def _build_system_prompt() -> str:
         return (
@@ -82,7 +149,8 @@ class ContextManager:
             "2. 回答要准确、专业、有条理\n"
             "3. 如果引用原文，注明所在页码\n"
             "4. 如果问题超出论文范围，诚实说明\n"
-            "5. 使用中文回答，专业术语可保留英文并附中文解释"
+            "5. 使用中文回答，专业术语可保留英文并附中文解释\n"
+            "6. 注意利用提供的元信息、图表描述、参考文献等结构化数据来回答相关问题"
         )
 
     def _truncate_text(self, text: str, token_budget: int) -> str:

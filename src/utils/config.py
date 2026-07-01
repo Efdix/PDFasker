@@ -27,19 +27,26 @@ _DEFAULT_LIBRARY = Path.home() / "Documents" / "PDFasker_Library"
 
 
 DEFAULT_CONFIG: dict = {
-    "reading_api": {
+    "parse_api": {
         "provider": "DeepSeek",
         "api_key": "",
         "base_url": "https://api.deepseek.com",
         "model": "deepseek-v4-flash",
-        "description": "文献阅读 API — 用于 PDF 结构识别、段落翻译、图片解读、论文问答",
+        "description": "阅读-解析 API — 用于 PDF 逐页视觉解析、跨页整合、论文问答（需视觉多模态能力）",
     },
-    "review_api": {
+    "translate_api": {
         "provider": "DeepSeek",
         "api_key": "",
         "base_url": "https://api.deepseek.com",
         "model": "deepseek-v4-flash",
-        "description": "综述写作 API — 用于引文核查、综述优化",
+        "description": "阅读-翻译 API — 用于段落中英对照翻译（可用便宜快速的模型）",
+    },
+    "write_api": {
+        "provider": "DeepSeek",
+        "api_key": "",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
+        "description": "写作 API — 用于综述引文核查、综述优化（需强推理能力）",
     },
     "max_tokens": 1_000_000,
     "library_path": str(_DEFAULT_LIBRARY),
@@ -80,7 +87,7 @@ def _doc_id(file_path: str) -> str:
 # ========== 配置读写 ==========
 
 def load_config() -> dict:
-    """加载配置，兼容旧版本 5-API 格式自动迁移到新 2-API 格式。"""
+    """加载配置，兼容旧版本格式自动迁移。"""
     cf = _config_file()
     if not cf.exists():
         return DEFAULT_CONFIG.copy()
@@ -92,43 +99,26 @@ def load_config() -> dict:
 
     config = DEFAULT_CONFIG.copy()
 
-    # 迁移旧 5-API 格式 → 新 2-API 格式
-    if "reading_api" not in saved:
-        # 优先从 chat_api 或 format_api 迁移
-        old_reading = saved.get("chat_api") or saved.get("format_api") or saved.get("translation_api") or {}
-        if not old_reading and "api_key" in saved:
-            old_reading = {
-                "provider": saved.get("provider", "DeepSeek"),
-                "api_key": saved.get("api_key", ""),
-                "base_url": saved.get("base_url", "https://api.deepseek.com"),
-                "model": saved.get("model", "deepseek-v4-flash"),
-            }
-        if old_reading:
-            saved["reading_api"] = {
-                "provider": old_reading.get("provider", "DeepSeek"),
-                "api_key": old_reading.get("api_key", ""),
-                "base_url": old_reading.get("base_url", "https://api.deepseek.com"),
-                "model": old_reading.get("model", "deepseek-v4-flash"),
-            }
-            saved["reading_api"]["description"] = "文献阅读 API — 用于 PDF 结构识别、段落翻译、图片解读、论文问答"
+    # ---- 迁移旧 reading_api → parse_api ----
+    if "reading_api" in saved and "parse_api" not in saved:
+        saved["parse_api"] = saved.pop("reading_api")
+        saved["parse_api"]["description"] = "阅读-解析 API — 用于 PDF 逐页视觉解析、跨页整合、论文问答"
 
-    if "review_api" not in saved:
-        old_review = saved.get("review_api") or saved.get("chat_api") or {}
-        if not old_review and "api_key" in saved:
-            old_review = {
-                "provider": saved.get("provider", "DeepSeek"),
-                "api_key": saved.get("api_key", ""),
-                "base_url": saved.get("base_url", "https://api.deepseek.com"),
-                "model": saved.get("model", "deepseek-v4-flash"),
-            }
-        if old_review:
-            saved["review_api"] = {
-                "provider": old_review.get("provider", "DeepSeek"),
-                "api_key": old_review.get("api_key", ""),
-                "base_url": old_review.get("base_url", "https://api.deepseek.com"),
-                "model": old_review.get("model", "deepseek-v4-flash"),
-            }
-            saved["review_api"]["description"] = "综述写作 API — 用于引文核查、综述优化"
+    # ---- 迁移旧 review_api → write_api ----
+    if "review_api" in saved and "write_api" not in saved:
+        saved["write_api"] = saved.pop("review_api")
+        saved["write_api"]["description"] = "写作 API — 用于综述引文核查、综述优化"
+
+    # ---- 如果只有旧单 API 格式（api_key 在顶层）----
+    if "parse_api" not in saved and "api_key" in saved:
+        saved["parse_api"] = {
+            "provider": saved.get("provider", "DeepSeek"),
+            "api_key": saved.get("api_key", ""),
+            "base_url": saved.get("base_url", "https://api.deepseek.com"),
+            "model": saved.get("model", "deepseek-v4-flash"),
+        }
+    if "translate_api" not in saved and "parse_api" in saved:
+        saved["translate_api"] = dict(saved["parse_api"])
 
     config.update(saved)
     return config
@@ -140,13 +130,17 @@ def save_config(config: dict) -> None:
     cf.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def get_reading_api(config: dict) -> dict:
-    """获取文献阅读 API 配置。"""
-    return config.get("reading_api", DEFAULT_CONFIG["reading_api"])
+def get_parse_api(config: dict) -> dict:
+    """获取阅读-解析 API 配置。"""
+    return config.get("parse_api", DEFAULT_CONFIG["parse_api"])
 
-def get_review_api(config: dict) -> dict:
-    """获取综述写作 API 配置。"""
-    return config.get("review_api", DEFAULT_CONFIG["review_api"])
+def get_translate_api(config: dict) -> dict:
+    """获取阅读-翻译 API 配置。"""
+    return config.get("translate_api", DEFAULT_CONFIG["translate_api"])
+
+def get_write_api(config: dict) -> dict:
+    """获取写作 API 配置。"""
+    return config.get("write_api", DEFAULT_CONFIG["write_api"])
 
 
 # ========== PDF 图书馆 ==========

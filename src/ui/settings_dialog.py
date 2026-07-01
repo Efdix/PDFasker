@@ -1,4 +1,4 @@
-"""API 配置对话框 —— 两套 API 独立配置：文献阅读 + 综述写作 + 处理设置"""
+"""API 配置对话框 —— 三套 API 独立配置：阅读-解析、阅读-翻译、写作 + 处理设置"""
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -28,6 +28,7 @@ class APIConfigTab(QWidget):
         provider_group = QGroupBox("提供商")
         pg = QVBoxLayout(provider_group)
         self.provider_combo = QComboBox()
+        self.provider_combo.setEditable(True)  # 统一使用内联下拉
         self.provider_combo.addItems(list(PROVIDERS.keys()))
         self.provider_combo.currentTextChanged.connect(self._on_provider)
         pg.addWidget(self.provider_combo)
@@ -117,7 +118,6 @@ class ProcessingSettingsTab(QWidget):
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        # ---- 处理模式 ----
         mode_group = QGroupBox("处理模式")
         mode_layout = QVBoxLayout(mode_group)
 
@@ -140,10 +140,8 @@ class ProcessingSettingsTab(QWidget):
         mode_layout.addWidget(self._async_radio)
         layout.addWidget(mode_group)
 
-        # ---- 并发数 ----
         concurrency_group = QGroupBox("并发设置（仅异步模式）")
         concurrency_layout = QFormLayout(concurrency_group)
-
         self._concurrency_spin = QSpinBox()
         self._concurrency_spin.setRange(1, 10)
         self._concurrency_spin.setValue(3)
@@ -154,13 +152,10 @@ class ProcessingSettingsTab(QWidget):
         )
         self._concurrency_spin.setSuffix(" 页同时")
         concurrency_layout.addRow("并发页数：", self._concurrency_spin)
-
-        # 当切换到同步模式时禁用并发设置
         self._sync_radio.toggled.connect(
             lambda checked: self._concurrency_spin.setEnabled(not checked)
         )
         layout.addWidget(concurrency_group)
-
         layout.addStretch()
 
     def load(self, config: dict):
@@ -169,7 +164,6 @@ class ProcessingSettingsTab(QWidget):
             self._sync_radio.setChecked(True)
         else:
             self._async_radio.setChecked(True)
-
         concurrency = config.get("stage1_concurrency", 3)
         self._concurrency_spin.setValue(max(1, min(10, concurrency)))
 
@@ -181,12 +175,12 @@ class ProcessingSettingsTab(QWidget):
 
 
 class SettingsDialog(QDialog):
-    """API 配置对话框（两标签页：文献阅读 + 综述写作）"""
+    """API 配置对话框（三标签页：阅读-解析 + 阅读-翻译 + 写作 + 处理设置）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("API 配置")
-        self.setMinimumSize(680, 600)
+        self.setMinimumSize(680, 620)
         self.setModal(True)
         self._config = load_config()
         self._setup_ui()
@@ -201,17 +195,22 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
 
         self.tabs = QTabWidget()
-        self._reading_tab = APIConfigTab(
-            "reading",
-            "📖 文献阅读 API — 用于 PDF 结构识别、段落翻译、图片解读、论文问答。\n建议使用支持视觉的多模态模型以获得最佳 PDF 结构识别效果。"
+        self._parse_tab = APIConfigTab(
+            "parse",
+            "📖 阅读-解析 API — 用于 PDF 逐页视觉解析、跨页整合、论文问答。\n需使用支持视觉的多模态模型。"
         )
-        self._review_tab = APIConfigTab(
-            "review",
-            "📝 综述写作 API — 用于引文核查、综述内容优化。建议使用强推理模型。"
+        self._translate_tab = APIConfigTab(
+            "translate",
+            "📖 阅读-翻译 API — 用于段落中英对照翻译。\n可用便宜快速的模型。"
+        )
+        self._write_tab = APIConfigTab(
+            "write",
+            "📝 写作 API — 用于综述引文核查、综述内容优化。\n建议使用强推理模型。"
         )
         self._processing_tab = ProcessingSettingsTab()
-        self.tabs.addTab(self._reading_tab, "📖 文献阅读")
-        self.tabs.addTab(self._review_tab, "📝 综述写作")
+        self.tabs.addTab(self._parse_tab, "📖 阅读-解析")
+        self.tabs.addTab(self._translate_tab, "📖 阅读-翻译")
+        self.tabs.addTab(self._write_tab, "📝 写作")
         self.tabs.addTab(self._processing_tab, "⚙️ 处理设置")
         layout.addWidget(self.tabs)
 
@@ -230,13 +229,15 @@ class SettingsDialog(QDialog):
         layout.addLayout(btn)
 
     def _load(self):
-        self._reading_tab.load(self._config.get("reading_api", {}))
-        self._review_tab.load(self._config.get("review_api", {}))
+        self._parse_tab.load(self._config.get("parse_api", {}))
+        self._translate_tab.load(self._config.get("translate_api", {}))
+        self._write_tab.load(self._config.get("write_api", {}))
         self._processing_tab.load(self._config)
 
     def _save(self):
-        self._config["reading_api"] = self._reading_tab.get()
-        self._config["review_api"] = self._review_tab.get()
+        self._config["parse_api"] = self._parse_tab.get()
+        self._config["translate_api"] = self._translate_tab.get()
+        self._config["write_api"] = self._write_tab.get()
         self._config.update(self._processing_tab.get())
         save_config(self._config)
         mode = self._config.get("stage1_mode", "async")

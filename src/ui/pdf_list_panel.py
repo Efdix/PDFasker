@@ -18,6 +18,7 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from ..utils.config import (
     load_config, save_config, load_library, save_library,
     add_pdf_to_library, remove_pdf_from_library, get_library_folders,
+    delete_chat_history, delete_doc_state, delete_page_cache,
 )
 
 
@@ -26,8 +27,10 @@ class PDFListPanel(QWidget):
 
     pdf_selected = Signal(str)
     pdf_removed = Signal(str)
-    pdf_reload_requested = Signal(str)  # 清除缓存后重新加载
+    pdf_reload_requested = Signal(str)  # 清除全部缓存后重新加载
     pdf_imported = Signal(str)          # PDF 导入后立即触发分析
+    restage1_requested = Signal(str)    # 仅重跑逐页解析
+    restage2_requested = Signal(str)    # 仅重跑跨页整合
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -240,9 +243,11 @@ class PDFListPanel(QWidget):
                 a = move_menu.addAction(f)
                 a.triggered.connect(lambda checked, folder=f: self._move_pdf(path, folder))
             menu.addSeparator()
-            a = menu.addAction("  🔄 重新加载 (清除缓存)")
-            a.triggered.connect(lambda: self._reload_pdf(path))
-            a = menu.addAction("  从库中移除")
+            a = menu.addAction("  � 重新逐页解析")
+            a.triggered.connect(lambda: self._on_restage1(path))
+            a = menu.addAction("  🔄 重新跨页整合")
+            a.triggered.connect(lambda: self._on_restage2(path))
+            a = menu.addAction("  🗑️ 从库中移除")
             a.triggered.connect(lambda: self._remove_pdf(path))
         elif data and data.get("type") == "folder":
             name = data.get("name", "")
@@ -265,18 +270,40 @@ class PDFListPanel(QWidget):
         save_library(lib)
         self._refresh()
 
+    def _on_restage1(self, path: str):
+        """仅重跑逐页解析。"""
+        r = QMessageBox.question(self, "确认",
+            "重新逐页解析？\n\n"
+            "此操作将清除页面缓存，保留跨页整合结果。\n"
+            "需要重新调用视觉 LLM（较贵）。")
+        if r == QMessageBox.StandardButton.Yes:
+            delete_page_cache(path)
+            self.restage1_requested.emit(path)
+
+    def _on_restage2(self, path: str):
+        """仅重跑跨页整合。"""
+        r = QMessageBox.question(self, "确认",
+            "重新跨页整合？\n\n"
+            "此操作仅清除整合结果，保留逐页解析缓存。\n"
+            "仅调用纯文本 LLM（便宜）。")
+        if r == QMessageBox.StandardButton.Yes:
+            delete_doc_state(path)
+            self.restage2_requested.emit(path)
+
     def _remove_pdf(self, path: str):
         r = QMessageBox.question(self, "确认",
-            "从论文库中移除此 PDF 并删除原文件？\n\n"
+            "从论文库中移除此 PDF 并删除所有关联数据？\n\n"
             "此操作将：\n"
             "• 删除磁盘上的 PDF 文件\n"
-            "• 清除关联的对话和排版记录")
+            "• 清除逐页解析缓存\n"
+            "• 清除跨页整合结果\n"
+            "• 清除对话历史\n"
+            "• 清除翻译/排版状态")
         if r == QMessageBox.StandardButton.Yes:
-            from ..utils.config import delete_chat_history, delete_doc_state
             delete_chat_history(path)
             delete_doc_state(path)
+            delete_page_cache(path)
             remove_pdf_from_library(path)
-            # 删除磁盘文件
             try:
                 os.remove(path)
             except OSError as e:

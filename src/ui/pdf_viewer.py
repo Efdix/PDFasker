@@ -1,10 +1,4 @@
-"""PDF 阅读器面板 v2 —— 对接两阶段管线：逐页解析 + 跨页整合。
-
-设计原则：
-- PDF 导入后自动后台进行 Stage 1（逐页视觉解析），显示进度
-- Stage 1 完成后用户点击论文触发 Stage 2（跨页整合）
-- 渲染结构化文档卡片（标题/正文/图表/元信息）
-"""
+"""PDF 阅读器面板 v2 —— 两阶段管线 + 结构化渲染。"""
 
 from __future__ import annotations
 
@@ -27,8 +21,6 @@ if TYPE_CHECKING:
         StructuredElement, StructuredDocument, PDFProcessor,
     )
 
-# ---- 常量 ----
-
 PLACEHOLDER_TEXT = (
     "📄 从左侧论文库选择或拖拽 PDF 开始阅读\n\n"
     "• 导入后自动 AI 解析论文结构（逐页分析）\n"
@@ -37,17 +29,20 @@ PLACEHOLDER_TEXT = (
     "• 英文段落一键翻译为中文"
 )
 
+# 关键章节名（subtitle/abstract_heading 匹配到则突出显示）
+KEY_SECTIONS = frozenset({
+    "abstract", "introduction", "results", "discussion",
+    "conclusion", "methods", "method", "background",
+    "related work", "summary", "findings",
+})
 
-# ============================================================
-# 后台工作线程
-# ============================================================
 
 class TranslationWorker(QThread):
-    """翻译工作线程。"""
+    """翻译工作线程 —— 使用阅读-翻译 API。"""
     finished = Signal(int, str)
     error = Signal(int, str)
 
-    def __init__(self, client: LLMClient, idx: int, text: str):
+    def __init__(self, client: "LLMClient", idx: int, text: str):
         super().__init__()
         self._client = client
         self._idx = idx
@@ -56,14 +51,11 @@ class TranslationWorker(QThread):
     def run(self):
         try:
             result = self._client.chat_sync([
-                {
-                    "role": "system",
-                    "content": (
-                        "你是学术论文翻译助手。将以下段落译成中文。"
-                        "要求：术语准确，首次出现保留英文括号注中文；"
-                        "保持段落结构；自然流畅；只输出译文。"
-                    ),
-                },
+                {"role": "system", "content": (
+                    "你是学术论文翻译助手。将以下段落译成中文。"
+                    "要求：术语准确，首次出现保留英文括号注中文；"
+                    "保持段落结构；自然流畅；只输出译文。"
+                )},
                 {"role": "user", "content": self._text},
             ])
             self.finished.emit(self._idx, result)
@@ -71,12 +63,8 @@ class TranslationWorker(QThread):
             self.error.emit(self._idx, str(e))
 
 
-# ============================================================
-# 段落卡片
-# ============================================================
-
 class ParagraphCard(QFrame):
-    """结构化段落卡片 —— 根据元素类型自适应样式。"""
+    """结构化段落卡片 —— 仅对结构标签词句做视觉区分。"""
     translate_requested = Signal(int, str)
 
     def __init__(self, elem: "StructuredElement", index: int, parent=None):
@@ -114,6 +102,18 @@ class ParagraphCard(QFrame):
             return False
         return (ascii_chars / alpha_chars) > 0.5
 
+    def _is_key_section(self) -> bool:
+        """判断元素是否为关键章节的结构标签。"""
+        etype = self._elem.element_type
+        if etype not in ("subtitle", "abstract_heading"):
+            return False
+        sn = (self._elem.section_name or "").lower().strip()
+        if sn in KEY_SECTIONS:
+            return True
+        # 也检查 text 本身（如 "Abstract"）
+        txt = self._text.lower().strip().rstrip(".:：。")
+        return txt in KEY_SECTIONS
+
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMinimumWidth(0)
@@ -121,8 +121,8 @@ class ParagraphCard(QFrame):
         etype = self._elem.element_type
         priority = self._elem.display_priority
         level = self._elem.heading_level
+        is_key = self._is_key_section()
 
-        # 可折叠元素默认隐藏
         if priority == "collapsed":
             self.setVisible(False)
             self._make_card_base("#1a1b26", "#2a2c3d")
@@ -135,12 +135,16 @@ class ParagraphCard(QFrame):
 
         if etype == "title":
             self._setup_title_card()
+        elif etype == "subtitle" and is_key:
+            self._setup_key_subtitle_card(level)
         elif etype == "subtitle":
             self._setup_subtitle_card(level)
-        elif etype in ("authors", "affiliations", "metadata"):
-            self._setup_meta_card()
+        elif etype == "abstract_heading" and is_key:
+            self._setup_key_abstract_heading_card()
         elif etype == "abstract_heading":
             self._setup_abstract_heading_card()
+        elif etype in ("authors", "affiliations", "metadata"):
+            self._setup_meta_card()
         elif etype == "abstract_body":
             self._setup_abstract_card()
         elif etype in ("keywords", "acknowledgment", "appendix"):
@@ -172,23 +176,64 @@ class ParagraphCard(QFrame):
         self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.text_label)
 
-    def _setup_subtitle_card(self, level: int):
-        self._make_card_base("#1a1b26", "#3b3d54")
+    def _setup_key_subtitle_card(self, level: int):
+        """关键章节标题（如 Introduction、Results）—— 醒目的暖金色。"""
+        self._make_card_base("#1a1b26", "#e0af68")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 14, 20, 10)
+        layout.setContentsMargins(20, 16, 20, 10)
         layout.setSpacing(6)
         sizes = {1: 18, 2: 16, 3: 14}
-        colors = {1: "#bb9af7", 2: "#9ece6a", 3: "#e0af68"}
-        f = QFont("Microsoft YaHei UI", sizes.get(level, 15))
+        f = QFont("Microsoft YaHei UI", sizes.get(level, 16))
         f.setBold(True)
         self.text_label = QLabel(self._text)
         self.text_label.setFont(f)
         self.text_label.setStyleSheet(
-            f"color: {colors.get(level, '#7aa2f7')}; padding: 4px 0; "
-            f"border-left: 4px solid {colors.get(level, '#7aa2f7')}; padding-left: 12px;"
+            "color: #e0af68; padding: 6px 0; "
+            "border-left: 4px solid #e0af68; padding-left: 14px;"
         )
         self.text_label.setWordWrap(True)
         self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.text_label)
+
+    def _setup_subtitle_card(self, level: int):
+        """普通小节标题。"""
+        self._make_card_base("#1a1b26", "#3b3d54")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 12, 20, 8)
+        layout.setSpacing(4)
+        sizes = {1: 16, 2: 14, 3: 13}
+        colors = {1: "#bb9af7", 2: "#9ece6a", 3: "#8a8ea6"}
+        f = QFont("Microsoft YaHei UI", sizes.get(level, 14))
+        f.setBold(True)
+        self.text_label = QLabel(self._text)
+        self.text_label.setFont(f)
+        self.text_label.setStyleSheet(
+            f"color: {colors.get(level, '#a9b1d6')}; padding: 3px 0; "
+            f"border-left: 3px solid {colors.get(level, '#3b3d54')}; padding-left: 10px;"
+        )
+        self.text_label.setWordWrap(True)
+        self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.text_label)
+
+    def _setup_key_abstract_heading_card(self):
+        """关键摘要标签 —— 暖金色突出。"""
+        self._make_card_base("#1e2035", "#e0af68")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 10, 20, 6)
+        header = QLabel("📝 摘要")
+        header.setStyleSheet("color: #e0af68; font-size: 16px; font-weight: bold;")
+        layout.addWidget(header)
+        self.text_label = QLabel("")
+        layout.addWidget(self.text_label)
+
+    def _setup_abstract_heading_card(self):
+        self._make_card_base("#1e2035", "#3b3d54")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 8, 20, 6)
+        header = QLabel("📝 摘要")
+        header.setStyleSheet("color: #bb9af7; font-size: 14px; font-weight: bold;")
+        layout.addWidget(header)
+        self.text_label = QLabel("")
         layout.addWidget(self.text_label)
 
     def _setup_meta_card(self):
@@ -206,17 +251,6 @@ class ParagraphCard(QFrame):
         self.text_label.setStyleSheet("color: #636688; line-height: 1.5; padding: 2px 0;")
         self.text_label.setWordWrap(True)
         self.text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.text_label)
-
-    def _setup_abstract_heading_card(self):
-        """Abstract 标题 —— 小标签样式"""
-        self._make_card_base("#1e2035", "#3b3d54")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 8, 20, 6)
-        header = QLabel("📝 摘要")
-        header.setStyleSheet("color: #bb9af7; font-size: 14px; font-weight: bold;")
-        layout.addWidget(header)
-        self.text_label = QLabel("")
         layout.addWidget(self.text_label)
 
     def _setup_abstract_card(self):
@@ -276,6 +310,7 @@ class ParagraphCard(QFrame):
         layout.addWidget(self.text_label)
 
     def _setup_body_card(self):
+        """正文段落 —— 保持原样，不做特殊区分。"""
         self._make_card_base("#1a1b26", "#2a2c3d")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 12, 20, 12)
@@ -359,12 +394,8 @@ class ParagraphCard(QFrame):
         return self._elem.element_type in ("body", "abstract_body")
 
 
-# ============================================================
-# 图片卡片
-# ============================================================
-
 class ImageCard(QFrame):
-    """图片/表格卡片 —— 展示 LLM 识别的学术插图。"""
+    """图片/表格卡片。"""
 
     MAX_IMAGE_WIDTH = 560
     MARGIN_LR = 16
@@ -394,17 +425,14 @@ class ImageCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(self.MARGIN_LR, self.MARGIN_TB, self.MARGIN_LR, self.MARGIN_TB)
         layout.setSpacing(8)
-
         page_label = QLabel(label_text)
         page_label.setStyleSheet("color: #9599b5; font-size: 11px;")
         page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(page_label)
-
         self._img_label = QLabel()
         self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._img_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(self._img_label)
-
         if self._caption:
             cap = QLabel(self._caption)
             cap.setWordWrap(True)
@@ -412,7 +440,6 @@ class ImageCard(QFrame):
             cap.setStyleSheet("color: #8a8ea6; font-style: italic; padding: 4px 0;")
             cap.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             layout.addWidget(cap)
-
         if self._description:
             desc = QLabel(f"💡 {self._description}")
             desc.setWordWrap(True)
@@ -420,7 +447,6 @@ class ImageCard(QFrame):
             desc.setStyleSheet("color: #7aa2f7; padding: 4px 0;")
             desc.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             layout.addWidget(desc)
-
         self._load_pixmap()
 
     def _load_pixmap(self):
@@ -461,8 +487,7 @@ class ImageCard(QFrame):
             display = pixmap
         self._img_label.setPixmap(display)
         self._img_label.setFixedHeight(display.height())
-        total_h = self._calc_total_height(card_w)
-        self.setFixedHeight(total_h)
+        self.setFixedHeight(self._calc_total_height(card_w))
 
     def _calc_total_height(self, card_w: int) -> int:
         h = self.MARGIN_TB * 2 + 30
@@ -474,44 +499,40 @@ class ImageCard(QFrame):
         return max(h, 80)
 
 
-# ============================================================
-# PDF 阅读器面板
-# ============================================================
-
 class PDFViewerPanel(QWidget):
     """PDF 阅读器主面板 v2 —— 两阶段管线展示。"""
 
     pdf_loaded = Signal(str)
     pdf_path_changed = Signal(str)
     follow_up_question = Signal(str)
-    stage2_requested = Signal(str)  # 请求触发 Stage 2 整合
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._current_path: str = ""
-        self._llm_client: LLMClient | None = None
+        self._parse_client: LLMClient | None = None
+        self._translate_client: LLMClient | None = None
         self._processor: PDFProcessor | None = None
         self._structured_doc: StructuredDocument | None = None
         self._cards: list[ParagraphCard | ImageCard] = []
         self._trans_worker: TranslationWorker | None = None
         self._auto_translate: bool = False
         self._stage1_complete: bool = False
-
         self._setup_ui()
 
-    def set_llm_client(self, client: LLMClient | None):
-        """设置文献阅读 LLM 客户端。"""
-        self._llm_client = client
+    def set_parse_client(self, client: "LLMClient | None"):
+        self._parse_client = client
+
+    def set_translate_client(self, client: "LLMClient | None"):
+        self._translate_client = client
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ---- 工具栏 ----
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(12, 8, 12, 8)
-        title = QLabel("📖 论文阅读")
+        title = QLabel("📖 阅读")
         title.setObjectName("titleLabel")
         toolbar.addWidget(title)
         toolbar.addStretch()
@@ -531,7 +552,6 @@ class PDFViewerPanel(QWidget):
 
         layout.addLayout(toolbar)
 
-        # ---- 进度条 ----
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("background-color: #2a2c3d; max-height: 1px;")
@@ -539,11 +559,9 @@ class PDFViewerPanel(QWidget):
 
         info = QHBoxLayout()
         info.setContentsMargins(12, 4, 12, 4)
-
         self.info_label = QLabel("尚未加载 PDF — 从左侧论文库选择或拖拽 PDF 文件")
         self.info_label.setObjectName("subtitleLabel")
         info.addWidget(self.info_label)
-
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -559,12 +577,10 @@ class PDFViewerPanel(QWidget):
         info.addStretch()
         layout.addLayout(info)
 
-        # ---- 阅读区 ----
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setStyleSheet("QScrollArea { border: none; background: #1a1b26; }")
-
         self.container = QWidget()
         self.container.setMinimumWidth(0)
         self.container.setStyleSheet("background: #1a1b26;")
@@ -573,18 +589,13 @@ class PDFViewerPanel(QWidget):
         self.card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.card_layout.setSpacing(0)
         self.card_layout.setContentsMargins(0, 10, 0, 20)
-
         self.placeholder = QLabel(PLACEHOLDER_TEXT)
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder.setStyleSheet("color: #636688; padding: 80px 40px; font-size: 15px;")
         self.card_layout.addWidget(self.placeholder)
-
         self.scroll_area.setWidget(self.container)
         layout.addWidget(self.scroll_area, 1)
-
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll)
-
-    # ---- PDF 加载（新流程） ----
 
     def get_current_path(self) -> str:
         return self._current_path
@@ -595,14 +606,36 @@ class PDFViewerPanel(QWidget):
             self.load_pdf(path)
 
     def load_pdf(self, file_path: str):
-        """加载 PDF —— 自动启动 Stage 1 逐页解析。"""
+        """加载 PDF —— 检查缓存 → Stage1 → Stage2。"""
         self._reset_view()
         self._current_path = file_path
 
-        if not self._llm_client:
-            self.info_label.setText("⚠️ 未配置文献阅读 API")
+        if not self._parse_client:
+            self.info_label.setText("⚠️ 未配置阅读-解析 API")
             self.info_label.setStyleSheet("color: #e0af68;")
             return
+
+        # ---- 先查 Stage 2 整合缓存 ----
+        from ..utils.config import load_doc_state
+        cached_state = load_doc_state(file_path)
+        cached_doc = cached_state.get("structured_document")
+        if cached_doc:
+            try:
+                from ..core.pdf_processor import StructuredDocument
+                doc = StructuredDocument.from_dict(cached_doc)
+                self._structured_doc = doc
+                self._render_document(doc)
+                self.info_label.setText(f"📖 {doc.title or '论文'} — 从缓存加载")
+                self.info_label.setStyleSheet("color: #9ece6a;")
+                self.progress_bar.setVisible(True)
+                self.progress_bar.setValue(100)
+                self.auto_trans_btn.setEnabled(True)
+                self.pdf_path_changed.emit(file_path)
+                full_text = "\n\n".join(e.text for e in doc.display_elements if e.text)
+                self.pdf_loaded.emit(full_text)
+                return
+            except Exception:
+                pass  # 缓存损坏，走正常流程
 
         self.info_label.setText("⏳ 初始化 PDF 处理器...")
         self.info_label.setStyleSheet("color: #e0af68;")
@@ -610,11 +643,9 @@ class PDFViewerPanel(QWidget):
 
         try:
             from ..core.pdf_processor import PDFProcessor
-
-            self._processor = PDFProcessor(file_path, self._llm_client)
-
-            # 检查缓存状态
+            self._processor = PDFProcessor(file_path, self._parse_client)
             manifest = self._processor.manifest
+
             if manifest and manifest.is_complete:
                 done = manifest.done_count
                 total = manifest.total_pages
@@ -628,20 +659,17 @@ class PDFViewerPanel(QWidget):
                 self.pdf_path_changed.emit(file_path)
                 return
 
-            # 连接信号
             self._processor.stage1_progress.connect(self._on_stage1_progress)
             self._processor.stage1_complete.connect(self._on_stage1_complete)
             self._processor.stage1_error.connect(self._on_stage1_error)
             self._processor.stage2_finished.connect(self._on_stage2_finished)
             self._processor.stage2_error.connect(self._on_stage2_error)
 
-            # 启动 Stage 1
             self._stage1_complete = False
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(0)
             self.integrate_btn.setVisible(False)
             self._processor.start_stage1()
-
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -649,14 +677,12 @@ class PDFViewerPanel(QWidget):
             self.info_label.setStyleSheet("color: #f7768e;")
 
     def _on_stage1_progress(self, pdf_path: str, current: int, total: int):
-        """Stage 1 进度更新。"""
         pct = int(current / max(total, 1) * 100)
         self.progress_bar.setValue(pct)
         self.info_label.setText(f"⏳ AI 分析第 {current}/{total} 页...")
         self.info_label.setStyleSheet("color: #e0af68;")
 
     def _on_stage1_complete(self, pdf_path: str):
-        """Stage 1 完成。"""
         self._stage1_complete = True
         self.progress_bar.setValue(100)
         manifest = self._processor.manifest if self._processor else None
@@ -673,11 +699,9 @@ class PDFViewerPanel(QWidget):
         self.pdf_path_changed.emit(pdf_path)
 
     def _on_stage1_error(self, pdf_path: str, page_num: int, error_msg: str):
-        """Stage 1 某页出错。"""
-        pass  # 进度中已有体现，不需额外处理
+        pass
 
     def _on_request_integrate(self):
-        """用户点击「AI 整合」按钮。"""
         if not self._processor:
             return
         self.integrate_btn.setEnabled(False)
@@ -687,38 +711,29 @@ class PDFViewerPanel(QWidget):
         QApplication.processEvents()
         self._processor.start_stage2()
 
-    def _on_stage2_finished(self, pdf_path: str, doc: StructuredDocument):
-        """Stage 2 整合完成 → 渲染文档。"""
+    def _on_stage2_finished(self, pdf_path: str, doc: "StructuredDocument"):
         self._structured_doc = doc
         self.integrate_btn.setVisible(False)
         self.progress_bar.setVisible(False)
         self._render_document(doc)
 
-        # 保存整合结果到 doc_state
         from ..utils.config import save_doc_state
-        save_doc_state(pdf_path, {
-            "structured_document": doc.to_dict(),
-        })
+        save_doc_state(pdf_path, {"structured_document": doc.to_dict()})
 
         self.info_label.setText(f"📖 {doc.title or '论文'} — {len(doc.display_elements)} 个元素")
         self.info_label.setStyleSheet("color: #9ece6a;")
         self.auto_trans_btn.setEnabled(True)
 
-        # 发射信号
         full_text = "\n\n".join(e.text for e in doc.display_elements if e.text)
         self.pdf_loaded.emit(full_text)
 
     def _on_stage2_error(self, pdf_path: str, error_msg: str):
-        """Stage 2 整合失败。"""
         self.integrate_btn.setEnabled(True)
         self.integrate_btn.setText("🔄 重试整合")
         self.info_label.setText(f"⚠️ 整合失败：{error_msg}，可重试")
         self.info_label.setStyleSheet("color: #f7768e;")
 
-    # ---- 文档渲染 ----
-
     def _reset_view(self):
-        """清空当前视图。"""
         self._structured_doc = None
         self._stage1_complete = False
         for card in self._cards:
@@ -731,26 +746,21 @@ class PDFViewerPanel(QWidget):
         self.integrate_btn.setVisible(False)
         self.auto_trans_btn.setEnabled(False)
 
-    def _render_document(self, doc: StructuredDocument):
-        """将 StructuredDocument 渲染为卡片列表。"""
+    def _render_document(self, doc: "StructuredDocument"):
         import os as _os
-
-        # 清除旧卡片
         for card in self._cards:
             card.setParent(None)
             card.deleteLater()
         self._cards.clear()
         self.placeholder.setVisible(False)
 
-        # 获取缓存目录用于解析图片路径
         image_base_dir = ""
         if self._processor:
-            from ..utils.config import _doc_id, get_page_cache_dir
+            from ..utils.config import get_page_cache_dir
             image_base_dir = str(get_page_cache_dir(self._current_path))
 
         for i, elem in enumerate(doc.display_elements):
             if elem.element_type in ("figure", "table") and elem.image_path:
-                # 解析图片完整路径
                 full_img_path = elem.image_path
                 if not _os.path.isabs(full_img_path) and image_base_dir:
                     full_img_path = _os.path.join(image_base_dir, elem.image_path)
@@ -758,22 +768,18 @@ class PDFViewerPanel(QWidget):
                     elem.image_path = full_img_path
                 card = ImageCard(elem, parent=self.container)
             elif elem.element_type in ("header_footer", "publisher_logo"):
-                continue  # 跳过无意义元素
+                continue
             else:
                 card = ParagraphCard(elem, i, parent=self.container)
                 card.translate_requested.connect(self._on_translate_request)
-
             self._cards.append(card)
             self.card_layout.addWidget(card)
-
         self.card_layout.addStretch()
 
-    # ---- 翻译 ----
-
     def _on_translate_request(self, idx: int, text: str):
-        if not self._llm_client:
+        if not self._translate_client:
             return
-        self._trans_worker = TranslationWorker(self._llm_client, idx, text)
+        self._trans_worker = TranslationWorker(self._translate_client, idx, text)
         self._trans_worker.finished.connect(self._on_translation_done)
         self._trans_worker.error.connect(self._on_translation_error)
         self._trans_worker.start()
@@ -795,14 +801,11 @@ class PDFViewerPanel(QWidget):
         self.auto_trans_btn.setText(f"🔄 自动翻译：{'开' if self._auto_translate else '关'}")
 
     def _on_scroll(self):
-        if not self._auto_translate:
-            return
-
-    # ---- 访问器 ----
+        pass
 
     def get_current_path(self) -> str:
         return self._current_path
 
     @property
-    def structured_document(self) -> StructuredDocument | None:
+    def structured_document(self) -> "StructuredDocument | None":
         return self._structured_doc
