@@ -92,6 +92,7 @@ class WritingCoach:
         self._current_profile: WritingProfile | None = None
         self._profiles: dict[str, WritingProfile] = {}
         self._load_profiles()
+        self._restore_last_profile()
 
     # ---- 路径 ----
 
@@ -114,6 +115,23 @@ class WritingCoach:
         d = self._profile_dir(name) / f"{paper_type}_papers"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def _last_profile_path(self) -> Path:
+        return self._kb_dir / "_last_profile.txt"
+
+    def _restore_last_profile(self) -> None:
+        """恢复上次关闭时使用的知识库。"""
+        lp = self._last_profile_path()
+        if lp.exists():
+            name = lp.read_text(encoding="utf-8").strip()
+            if name and name in self._profiles:
+                self._current_profile = self._profiles[name]
+
+    def _save_last_profile(self) -> None:
+        """保存当前知识库名，供下次启动恢复。"""
+        lp = self._last_profile_path()
+        name = self._current_profile.name if self._current_profile else ""
+        lp.write_text(name, encoding="utf-8")
 
     # ---- 加载 ----
 
@@ -170,6 +188,7 @@ class WritingCoach:
         self._profiles[name] = profile
         self._save_profile(profile)
         self._current_profile = profile
+        self._save_last_profile()
         return profile
 
     def switch_profile(self, name: str) -> WritingProfile:
@@ -177,6 +196,7 @@ class WritingCoach:
         if name not in self._profiles:
             raise ValueError(f"知识库 '{name}' 不存在")
         self._current_profile = self._profiles[name]
+        self._save_last_profile()
         return self._current_profile
 
     def delete_profile(self, name: str) -> None:
@@ -189,6 +209,7 @@ class WritingCoach:
         self._profiles.pop(name, None)
         if self._current_profile and self._current_profile.name == name:
             self._current_profile = None
+        self._save_last_profile()
 
     # ---- 公共 API: 论文管理 ----
 
@@ -397,7 +418,7 @@ class WritingCoach:
                 + all_text[-10000:]
             )
 
-        prompt = self.STYLE_ANALYSIS_PROMPT.format(paper_texts=all_text)
+        prompt = self.STYLE_ANALYSIS_PROMPT.replace("{paper_texts}", all_text)
         messages = [
             {"role": "system", "content": "你是学术写作风格分析专家。只返回 JSON，不要加解释。"},
             {"role": "user", "content": prompt},
@@ -467,22 +488,23 @@ class WritingCoach:
 3. 保持原有的引用标记不变
 4. 输出润色后的完整文字，不要加解释"""
 
-    CITE_REWRITE_PROMPT = """你是学术综述写作专家。请根据引文的原始文献内容，改写以下文字。
+    CITE_REWRITE_PROMPT = """你是学术综述写作专家。请根据提供的文献内容，改写以下文字。
 
 {style_context}
 
 【待改写的文字】
 {selected_text}
 
-【引文原始内容】
+【所有可用文献的摘要】（请根据待改写文字中的引用标记自动匹配对应的文献）
 {citation_texts}
 
 要求：
-1. 确保改写后的表述准确反映引文原文的发现
-2. 如果原文不支持当前表述，请指出并提供更准确的版本
-3. 保持综述应有的概括性风格，不要逐字照抄原文
-4. 保持引文标记不变
-5. 输出改写后的文字"""
+1. 先判断待改写文字中引用了哪些文献（不管引用格式是 [1]、(Author,Year) 还是其他），在可用文献中找到对应条目
+2. 确保改写后的表述准确反映引文原文的发现
+3. 如果原文不支持当前表述，请指出并提供更准确的版本
+4. 保持综述应有的概括性风格，不要逐字照抄原文
+5. 保持原有的引用标记不变
+6. 输出改写后的文字"""
 
     MISSING_LIT_PROMPT = """你是学术文献检索专家。分析以下综述草稿和已引用文献，找出可能遗漏的重要文献。
 
@@ -512,9 +534,7 @@ class WritingCoach:
             return ""
         system_prompt = self.build_writing_system_prompt(writing_type)
         style_context = f"风格规范：\n{system_prompt}" if system_prompt else ""
-        prompt = self.POLISH_PROMPT.format(
-            style_context=style_context,
-        )
+        prompt = self.POLISH_PROMPT.replace("{style_context}", style_context)
         messages = [
             {"role": "system", "content": system_prompt or "你是学术写作润色专家。"},
             {"role": "user", "content": prompt + "\n\n待润色文字：\n" + selected_text},
@@ -530,66 +550,55 @@ class WritingCoach:
     ) -> str:
         """基于 Zotero 引文原文改写选中文字。
 
-        解析选中文字中的引用标记 [1][2,3] → 查 Zotero → 提取原文 → 改写。
+        不管用户用什么引用格式，把 Zotero 库中所有文献信息发给 LLM，由 LLM 自动匹配。
         """
         if not selected_text.strip():
             return ""
 
-        import re
-        # 解析引用标记
-        cite_pattern = re.compile(r'\[(\d+(?:[,，\s]*\d+)*)\]')
-        cited_nums = set()
-        for m in cite_pattern.finditer(selected_text):
-            for num in re.split(r'[,，\s]+', m.group(1)):
-                if num.strip().isdigit():
-                    cited_nums.add(int(num.strip()))
-
-        if not cited_nums:
-            return "未在选中文字中检测到引用标记（如 [1]、[2,3]）"
-
-        # 从 Zotero 获取引用文献
-        zotero_items = []
+        # 收集所有 Zotero 文献的摘要信息（不分引用格式）
+        import fitz
+        all_citation_texts = []
         if zotero_lib and hasattr(zotero_lib, '_items'):
             for i, item in enumerate(zotero_lib._items):
-                if (i + 1) in cited_nums:
-                    zotero_items.append((i + 1, item))
+                if not item.title:
+                    continue
+                title = item.title
+                authors = ", ".join(item.authors[:3]) if item.authors else "?"
+                year = item.year or "?"
+                text = ""
+                if item.pdf_path and os.path.isfile(item.pdf_path):
+                    try:
+                        doc = fitz.open(item.pdf_path)
+                        parts = []
+                        for page in doc:
+                            parts.append(page.get_text())
+                            if len("\n".join(parts)) > 2000:
+                                break
+                        text = "\n".join(parts)[:2000]
+                        doc.close()
+                    except Exception:
+                        text = ""
+                if not text:
+                    text = getattr(item, 'abstract', '') or ""
+                if text:
+                    all_citation_texts.append(
+                        f"--- 文献 [{i+1}] {authors} ({year}) {title} ---\n{text[:2000]}"
+                    )
 
-        if not zotero_items:
-            return f"在 Zotero 库中未找到编号 {sorted(cited_nums)} 对应的文献"
-
-        # 提取原文
-        import fitz
-        citation_texts = []
-        for num, item in zotero_items:
-            title = item.title or "未知标题"
-            text = ""
-            if item.pdf_path and os.path.isfile(item.pdf_path):
-                try:
-                    doc = fitz.open(item.pdf_path)
-                    # 只取摘要和首段（控制在 3000 字内）
-                    parts = []
-                    for page in doc:
-                        parts.append(page.get_text())
-                        if len("\n".join(parts)) > 3000:
-                            break
-                    text = "\n".join(parts)[:3000]
-                    doc.close()
-                except Exception:
-                    text = f"[无法读取 PDF: {item.pdf_path}]"
-            else:
-                # 尝试从 Zotero 摘要中获取
-                text = getattr(item, 'abstract', '') or "（无 PDF 全文，仅标题可用）"
-
-            citation_texts.append(f"--- 引文 [{num}] {title} ---\n{text}")
+        if not all_citation_texts:
+            return "Zotero 库中没有可用的文献全文或摘要，无法进行基于引文的改写"
 
         system_prompt = self.build_writing_system_prompt(writing_type)
         style_context = f"风格规范：\n{system_prompt}" if system_prompt else ""
 
-        prompt = self.CITE_REWRITE_PROMPT.format(
-            style_context=style_context,
-            selected_text=selected_text,
-            citation_texts="\n\n".join(citation_texts),
-        )
+        prompt = (self.CITE_REWRITE_PROMPT
+            .replace("{style_context}", style_context)
+            .replace("{selected_text}", selected_text)
+            .replace("{citation_texts}", "\n\n".join(all_citation_texts)))
+        messages = [
+            {"role": "system", "content": system_prompt or "你是学术综述写作专家。请根据提供的文献内容，判断选中的文字引用了哪些文献，并据此改写。"},
+            {"role": "user", "content": prompt},
+        ]
         messages = [
             {"role": "system", "content": system_prompt or "你是学术综述写作专家。"},
             {"role": "user", "content": prompt},
@@ -632,30 +641,38 @@ class WritingCoach:
 
         cited_text = "\n".join(cited_parts) if cited_parts else "（未检测到引用或 Zotero 未连接）"
 
-        prompt = self.MISSING_LIT_PROMPT.format(
-            draft_text=draft_text[:8000],
-            cited_papers=cited_text[:3000],
-        )
+        prompt = (self.MISSING_LIT_PROMPT
+            .replace("{draft_text}", draft_text[:8000])
+            .replace("{cited_papers}", cited_text[:3000]))
         messages = [
             {"role": "system", "content": "你是学术文献检索专家。只返回 JSON，不要加解释。"},
             {"role": "user", "content": prompt},
         ]
         try:
             response = write_client.chat_sync(messages, timeout=120.0, max_tokens=3000)
-            # 解析
+            # 使用多级容错解析（复用 _parse_style_guide_response 的容错策略）
             import json as _json
             import re
             text = response.strip()
-            for pattern in [r'```json\s*(.*?)```', r'```\s*(.*?)```']:
+            # 尝试1: 直接解析
+            try:
+                return _json.loads(text)
+            except (_json.JSONDecodeError, TypeError):
+                pass
+            # 尝试2: 提取 ```json ... ```
+            for pattern in [r'```json\s*\n?(.*?)\n?```', r'```\s*\n?(.*?)\n?```']:
                 m = re.search(pattern, text, re.DOTALL)
                 if m:
-                    text = m.group(1).strip()
-                    break
+                    try:
+                        return _json.loads(m.group(1).strip())
+                    except (_json.JSONDecodeError, TypeError):
+                        pass
+            # 尝试3: 提取 { ... }
             first = text.find('{')
             last = text.rfind('}')
             if first >= 0 and last > first:
                 return _json.loads(text[first:last + 1])
-            return _json.loads(text)
+            return None
         except Exception:
             return None
 

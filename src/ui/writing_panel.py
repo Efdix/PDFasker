@@ -162,9 +162,19 @@ class MissingLitWorker(QThread):
                 "gaps": gaps,
                 "recommendations": rec_papers,
                 "search_results": search_papers,
+                "cited_dois": cited_dois,
+                "search_keywords": self._collect_keywords(gaps),
             })
         except Exception as e:
             self.error_signal.emit(str(e))
+
+    @staticmethod
+    def _collect_keywords(gaps: dict) -> list[str]:
+        """从 gaps 中提取所有搜索关键词。"""
+        keywords = []
+        for gap in gaps.get("horizontal_gaps", []) + gaps.get("vertical_gaps", []):
+            keywords.extend(gap.get("search_queries", []))
+        return keywords
 
 
 class ReviewCheckWorker(QThread):
@@ -415,8 +425,8 @@ class WritingPanel(QWidget):
         self._check_cite_btn.clicked.connect(self._on_check_citations)
         ai_layout.addWidget(self._check_cite_btn)
 
-        self._missing_lit_btn = QPushButton("🔍 检测遗漏文献")
-        self._missing_lit_btn.setToolTip("分析草稿主题，检索可能遗漏的文献")
+        self._missing_lit_btn = QPushButton("🔍 文献推荐")
+        self._missing_lit_btn.setToolTip("基于草稿主题和已引用文献，推荐可能遗漏的文献")
         self._missing_lit_btn.clicked.connect(self._on_detect_missing)
         ai_layout.addWidget(self._missing_lit_btn)
 
@@ -696,7 +706,7 @@ class WritingPanel(QWidget):
         if not self._write_client:
             QMessageBox.warning(self, "提示", "请先配置写作 API")
             return
-        if not self._zotero or not self._zotero.is_available:
+        if not self._zotero:
             QMessageBox.warning(self, "提示", "请先连接 Zotero 文献库")
             return
 
@@ -756,45 +766,76 @@ class WritingPanel(QWidget):
         self._progress_bar.setVisible(False)
         self._progress_bar.setRange(0, 100)
         self._missing_lit_btn.setEnabled(True)
-        self._missing_lit_btn.setText("🔍 检测遗漏文献")
-        self._status_label.setText("遗漏文献检测完成")
+        self._missing_lit_btn.setText("🔍 文献推荐")
+        self._status_label.setText("文献推荐完成")
 
         gaps = result.get("gaps", {})
         recs = result.get("recommendations", [])
         search = result.get("search_results", [])
+        cited_dois = result.get("cited_dois", [])
+        keywords = result.get("search_keywords", [])
 
-        # 构建展示文本
-        lines = ["=== 遗漏文献检测结果 ===\n"]
+        # 构建展示文本（富文本）
+        parts = ["<b>📊 文献推荐结果</b>"]
 
-        # 已覆盖方向
+        # LLM 理解
         covered = gaps.get("covered_domains", [])
         if covered:
-            lines.append("📊 已覆盖方向：")
+            parts.append("<br><b>🧠 LLM 理解——你的草稿覆盖了：</b>")
             for d in covered:
-                lines.append(f"  · {d.get('domain', '?')} ({d.get('paper_count', 0)}篇, 最新{d.get('latest_year', '?')})")
+                parts.append(f"  · {d.get('domain', '?')}（{d.get('paper_count', 0)}篇，最新 {d.get('latest_year', '?')}）")
 
-        # S2 推荐
+        horiz = gaps.get("horizontal_gaps", [])
+        if horiz:
+            parts.append("<br><b>⚠️ 横向遗漏方向：</b>")
+            for g in horiz:
+                parts.append(f"  · {g.get('domain', '?')}：{g.get('reason', '')}")
+
+        vert = gaps.get("vertical_gaps", [])
+        if vert:
+            parts.append("<br><b>🔄 纵向遗漏方向：</b>")
+            for g in vert:
+                parts.append(f"  · {g.get('domain', '?')}：{g.get('reason', '')}")
+
+        # 搜索关键词
+        if keywords:
+            parts.append("<br><b>🔑 S2 搜索关键词：</b>")
+            for kw in keywords[:10]:
+                parts.append(f"  · {kw}")
+
+        # 推荐 DOI
+        if cited_dois:
+            parts.append(f"<br><b>📎 S2 推荐所用 DOI（{len(cited_dois)} 个）：</b>")
+            for doi in cited_dois[:5]:
+                parts.append(f"  · {doi}")
+            if len(cited_dois) > 5:
+                parts.append(f"  ... 等 {len(cited_dois)} 个")
+
+        # 推荐结果
         if recs:
-            lines.append(f"\n📚 S2 推荐文献（基于你已引用文献）：")
-            for p in recs[:10]:
-                lines.append(f"  · {p['authors']} ({p['year']}) - {p['title'][:80]} ⭐{p.get('citationCount', 0)}")
+            parts.append(f"<br><b>📚 S2 推荐文献（共 {len(recs)} 篇）：</b>")
+            for p in recs[:8]:
+                parts.append(f"  · {p['authors']} ({p['year']}) - {p['title'][:80]} ⭐{p.get('citationCount', 0)}")
 
-        # 搜索补充
         if search:
-            lines.append(f"\n🔍 横向/纵向补充搜索：")
-            for p in search[:10]:
+            parts.append(f"<br><b>🔍 S2 关键词搜索结果（共 {len(search)} 篇）：</b>")
+            for p in search[:8]:
                 gap = p.get("gap_category", "")
-                lines.append(f"  [{gap}] {p['authors']} ({p['year']}) - {p['title'][:80]} ⭐{p.get('citationCount', 0)}")
+                parts.append(f"  [{gap}] {p['authors']} ({p['year']}) - {p['title'][:80]} ⭐{p.get('citationCount', 0)}")
 
-        # 导出 CSV 按钮
-        full_text = "\n".join(lines)
+        full_html = "<br>".join(parts)
+
+        # 纯文本版（供详细展开）
+        plain_parts = [p for p in parts]
+        plain_text = "\n".join(p.replace("<b>", "").replace("</b>", "").replace("<br>", "\n") for p in plain_parts)
+
         msg = QMessageBox(self)
-        msg.setWindowTitle("遗漏文献检测")
-        msg.setText(full_text[:2000])
-        msg.setDetailedText(full_text)
+        msg.setWindowTitle("文献推荐")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(full_html[:3000])
+        msg.setDetailedText(plain_text)
 
-        # 导出 CSV
-        export_btn = msg.addButton("导出选中为CSV", QMessageBox.ButtonRole.ActionRole)
+        export_btn = msg.addButton("导出为CSV", QMessageBox.ButtonRole.ActionRole)
         close_btn = msg.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
         msg.exec()
 
@@ -805,9 +846,9 @@ class WritingPanel(QWidget):
         self._progress_bar.setVisible(False)
         self._progress_bar.setRange(0, 100)
         self._missing_lit_btn.setEnabled(True)
-        self._missing_lit_btn.setText("🔍 检测遗漏文献")
-        self._status_label.setText(f"检测失败: {err[:60]}")
-        QMessageBox.warning(self, "检测失败", err)
+        self._missing_lit_btn.setText("🔍 文献推荐")
+        self._status_label.setText(f"推荐失败: {err[:60]}")
+        QMessageBox.warning(self, "文献推荐失败", err)
 
     def _export_missing_csv(self, papers: list[dict]):
         """导出文献列表为 CSV。"""
@@ -841,7 +882,7 @@ class WritingPanel(QWidget):
 
     def _update_zotero_status(self):
         if self._zotero and self._zotero.is_available:
-            count = len(self._zotero._items) if hasattr(self._zotero, '_items') else 0
+            count = self._zotero.item_count if hasattr(self._zotero, 'item_count') else 0
             self._zotero_status_label.setText(f"✅ 已连接 ({count} 篇文献)")
             self._zotero_status_label.setStyleSheet("color: #9ece6a; font-size: 12px;")
             # 更新路径显示

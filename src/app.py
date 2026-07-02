@@ -150,9 +150,15 @@ class MainWindow(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self._status_model_label = QLabel("未配置 API")
-        self._status_model_label.setStyleSheet("color: #a6adc8; padding: 2px 8px;")
-        self.status_bar.addPermanentWidget(self._status_model_label)
+        self._status_parse_label = QLabel("📖解析: -")
+        self._status_parse_label.setStyleSheet("color: #636688; padding: 2px 6px; font-size: 11px;")
+        self.status_bar.addPermanentWidget(self._status_parse_label)
+        self._status_translate_label = QLabel("📖翻译: -")
+        self._status_translate_label.setStyleSheet("color: #636688; padding: 2px 6px; font-size: 11px;")
+        self.status_bar.addPermanentWidget(self._status_translate_label)
+        self._status_write_label = QLabel("📝写作: -")
+        self._status_write_label.setStyleSheet("color: #636688; padding: 2px 6px; font-size: 11px;")
+        self.status_bar.addPermanentWidget(self._status_write_label)
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(STYLESHEET)
@@ -379,17 +385,28 @@ class MainWindow(QMainWindow):
         self.pdf_viewer.set_translate_client(self._llm_translate)
         self.chat_panel.set_input_enabled(self._llm_parse is not None)
 
-        if self._llm_parse:
-            model_name = parse_cfg.get("model", "unknown")
-            self._status_model_label.setText(f"📖 {model_name}")
-            self._status_model_label.setStyleSheet("color: #9ece6a; padding: 2px 8px;")
-        else:
-            self._status_model_label.setText("未配置 API")
-            self._status_model_label.setStyleSheet("color: #a6adc8; padding: 2px 8px;")
+        def _label(client, prefix):
+            if client:
+                return f"{prefix}: {client.model}"
+            return f"{prefix}: -"
+
+        self._status_parse_label.setText(_label(self._llm_parse, "📖解析"))
+        self._status_parse_label.setStyleSheet(
+            f"color: {'#9ece6a' if self._llm_parse else '#636688'}; padding: 2px 6px; font-size: 11px;"
+        )
+        self._status_translate_label.setText(_label(self._llm_translate, "📖翻译"))
+        self._status_translate_label.setStyleSheet(
+            f"color: {'#9ece6a' if self._llm_translate else '#636688'}; padding: 2px 6px; font-size: 11px;"
+        )
+        self._status_write_label.setText(_label(self._llm_write, "📝写作"))
+        self._status_write_label.setStyleSheet(
+            f"color: {'#9ece6a' if self._llm_write else '#636688'}; padding: 2px 6px; font-size: 11px;"
+        )
 
     def _init_write(self) -> None:
         zotero_dir = self._config.get("zotero_data_dir", "")
         self._zotero = ZoteroLibrary(zotero_dir)
+        self._zotero.load()
         if self._llm_write:
             self._review_checker = ReviewChecker(self._llm_write, self._zotero)
             self._writing_panel.set_checker(self._review_checker)
