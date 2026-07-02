@@ -706,7 +706,7 @@ class PDFViewerPanel(QWidget):
             return
         self.integrate_btn.setEnabled(False)
         self.integrate_btn.setText("⏳ 整合中...")
-        self.info_label.setText("🧠 正在跨页整合，构建结构化文档...")
+        self.info_label.setText("⏳ 正在跨页整合，构建结构化文档...")
         self.info_label.setStyleSheet("color: #e0af68;")
         QApplication.processEvents()
         self._processor.start_stage2()

@@ -18,7 +18,7 @@ from .core.zotero_parser import ZoteroLibrary
 from .ui.chat_panel import ChatPanel
 from .ui.pdf_list_panel import PDFListPanel
 from .ui.pdf_viewer import PDFViewerPanel
-from .ui.review_panel import ReviewPanel
+from .ui.writing_panel import WritingPanel
 from .ui.settings_dialog import SettingsDialog
 from .ui.styles import STYLESHEET
 from .utils.config import (
@@ -143,8 +143,8 @@ class MainWindow(QMainWindow):
         self._main_tabs.addTab(outer_splitter, "📖 阅读")
 
         # Tab 1: 写作
-        self._review_panel = ReviewPanel()
-        self._main_tabs.addTab(self._review_panel, "📝 写作")
+        self._writing_panel = WritingPanel()
+        self._main_tabs.addTab(self._writing_panel, "📝 写作")
 
         self.setCentralWidget(self._main_tabs)
 
@@ -350,7 +350,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._save_current_chat()
-        self._review_panel.shutdown()
+        self._writing_panel.shutdown()
         for proc in self._processors.values():
             if hasattr(proc, 'cancel'):
                 proc.cancel()
@@ -392,5 +392,6 @@ class MainWindow(QMainWindow):
         self._zotero = ZoteroLibrary(zotero_dir)
         if self._llm_write:
             self._review_checker = ReviewChecker(self._llm_write, self._zotero)
-            self._review_panel.set_checker(self._review_checker)
-        self._review_panel.set_zotero_library(self._zotero)
+            self._writing_panel.set_checker(self._review_checker)
+        self._writing_panel.set_write_client(self._llm_write)
+        self._writing_panel.set_zotero_library(self._zotero)

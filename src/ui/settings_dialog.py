@@ -1,9 +1,10 @@
-"""API 配置对话框 —— 三套 API 独立配置：阅读-解析、阅读-翻译、写作 + 处理设置"""
+"""API 配置对话框 —— 三套 API（嵌入处理设置和 Zotero 路径）。"""
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QPushButton, QFormLayout, QGroupBox, QMessageBox,
     QTabWidget, QWidget, QSpinBox, QRadioButton, QButtonGroup,
+    QFileDialog,
 )
 from PySide6.QtCore import Qt
 
@@ -12,9 +13,10 @@ from ..utils.config import load_config, save_config
 
 
 class APIConfigTab(QWidget):
-    """单个 API 配置标签页。"""
+    """单个 API 配置标签页，可选附加底部控件。"""
 
-    def __init__(self, tab_name: str, description: str, parent=None):
+    def __init__(self, tab_name: str, description: str,
+                 footer_widget: QWidget | None = None, parent=None):
         super().__init__(parent)
         self._tab_name = tab_name
         layout = QVBoxLayout(self)
@@ -28,7 +30,7 @@ class APIConfigTab(QWidget):
         provider_group = QGroupBox("提供商")
         pg = QVBoxLayout(provider_group)
         self.provider_combo = QComboBox()
-        self.provider_combo.setEditable(True)  # 统一使用内联下拉
+        self.provider_combo.setEditable(True)
         self.provider_combo.addItems(list(PROVIDERS.keys()))
         self.provider_combo.currentTextChanged.connect(self._on_provider)
         pg.addWidget(self.provider_combo)
@@ -52,6 +54,9 @@ class APIConfigTab(QWidget):
         self.model.setPlaceholderText("选择或输入模型名")
         form.addRow("模型:", self.model)
         layout.addWidget(cfg)
+
+        if footer_widget:
+            layout.addWidget(footer_widget)
 
         layout.addStretch()
 
@@ -102,61 +107,56 @@ class APIConfigTab(QWidget):
         }
 
 
-class ProcessingSettingsTab(QWidget):
-    """Stage 1 处理设置标签页 —— 同步/异步模式 + 并发数。"""
+class ProcessingSettingsGroup(QGroupBox):
+    """Stage 1 处理设置（嵌入阅读-解析标签页底部）。"""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__("⚙️ PDF 处理设置", parent)
         layout = QVBoxLayout(self)
-        layout.setSpacing(16)
-
-        desc = QLabel(
-            "控制 PDF 导入后逐页 AI 解析（Stage 1）的处理方式。\n"
-            "跨页整合（Stage 2）不受此设置影响。"
-        )
-        desc.setObjectName("subtitleLabel")
-        desc.setWordWrap(True)
-        layout.addWidget(desc)
-
-        mode_group = QGroupBox("处理模式")
-        mode_layout = QVBoxLayout(mode_group)
+        layout.setSpacing(8)
 
         self._mode_group = QButtonGroup(self)
+        mode_row = QHBoxLayout()
         self._sync_radio = QRadioButton("🔤 同步（逐页顺序）")
         self._sync_radio.setToolTip(
-            "一页一页顺序处理。\n"
-            "✅ 优点：稳定、不触发 API 限流、进度反馈精确\n"
-            "❌ 缺点：速度较慢，总耗时 = 单页耗时 × 页数"
+            "一页一页顺序处理。稳定、不触发限流。"
         )
         self._async_radio = QRadioButton("⚡ 异步（并发处理）")
         self._async_radio.setToolTip(
-            "多页同时发送 API 请求。\n"
-            "✅ 优点：速度更快（约 3-5 倍）\n"
-            "❌ 缺点：可能触发 API 限流、部分接口不支持高并发"
+            "多页同时发送。速度更快但可能触发限流。"
         )
         self._mode_group.addButton(self._sync_radio, 0)
         self._mode_group.addButton(self._async_radio, 1)
-        mode_layout.addWidget(self._sync_radio)
-        mode_layout.addWidget(self._async_radio)
-        layout.addWidget(mode_group)
+        mode_row.addWidget(self._sync_radio)
+        mode_row.addWidget(self._async_radio)
+        mode_row.addStretch()
+        layout.addLayout(mode_row)
 
-        concurrency_group = QGroupBox("并发设置（仅异步模式）")
-        concurrency_layout = QFormLayout(concurrency_group)
+        # 并发设置（仅异步可见）
+        self._concurrency_widget = QWidget()
+        conc_layout = QHBoxLayout(self._concurrency_widget)
+        conc_layout.setContentsMargins(0, 0, 0, 0)
+        conc_label = QLabel("并发页数：")
+        conc_label.setStyleSheet("color: #a9b1d6; font-size: 13px;")
+        conc_layout.addWidget(conc_label)
         self._concurrency_spin = QSpinBox()
         self._concurrency_spin.setRange(1, 10)
         self._concurrency_spin.setValue(3)
-        self._concurrency_spin.setToolTip(
-            "同时发送 API 请求的页数。\n"
-            "推荐 2-4：平衡速度与稳定性\n"
-            "设为 1 的效果等同于同步模式"
+        self._concurrency_spin.setToolTip("同时发送的页数，推荐 2-4")
+        self._concurrency_spin.setStyleSheet(
+            "QSpinBox { background-color: #24253a; color: #e2e5f2; "
+            "border: 1px solid #7aa2f7; border-radius: 4px; "
+            "padding: 3px 6px; font-size: 14px; font-weight: bold; }"
+            "QSpinBox:focus { border-color: #89b4fa; }"
         )
-        self._concurrency_spin.setSuffix(" 页同时")
-        concurrency_layout.addRow("并发页数：", self._concurrency_spin)
+        conc_layout.addWidget(self._concurrency_spin)
+        conc_layout.addStretch()
+        layout.addWidget(self._concurrency_widget)
+
+        # 选同步时隐藏并发设置
         self._sync_radio.toggled.connect(
-            lambda checked: self._concurrency_spin.setEnabled(not checked)
+            lambda checked: self._concurrency_widget.setVisible(not checked)
         )
-        layout.addWidget(concurrency_group)
-        layout.addStretch()
 
     def load(self, config: dict):
         mode = config.get("stage1_mode", "async")
@@ -174,15 +174,52 @@ class ProcessingSettingsTab(QWidget):
         }
 
 
+class ZoteroPathGroup(QGroupBox):
+    """Zotero 文献库路径设置（嵌入写作标签页底部）。"""
+
+    def __init__(self, parent=None):
+        super().__init__("📚 Zotero 文献库", parent)
+        layout = QHBoxLayout(self)
+        layout.setSpacing(6)
+
+        self._path_edit = QLineEdit()
+        self._path_edit.setPlaceholderText("自动检测或手动选择 Zotero 数据目录...")
+        self._path_edit.setStyleSheet(
+            "QLineEdit { background-color: #24253a; color: #cfd2e3; "
+            "border: 1px solid #3b3d54; border-radius: 4px; padding: 4px 8px; }"
+        )
+        layout.addWidget(self._path_edit)
+
+        browse_btn = QPushButton("📂")
+        browse_btn.setFixedWidth(64)
+        browse_btn.clicked.connect(self._browse)
+        layout.addWidget(browse_btn)
+
+    def _browse(self):
+        path = QFileDialog.getExistingDirectory(self, "选择 Zotero 数据目录")
+        if path:
+            self._path_edit.setText(path)
+
+    def load(self, config: dict):
+        self._path_edit.setText(config.get("zotero_data_dir", ""))
+
+    def get(self) -> str:
+        return self._path_edit.text().strip()
+
+
 class SettingsDialog(QDialog):
-    """API 配置对话框（三标签页：阅读-解析 + 阅读-翻译 + 写作 + 处理设置）"""
+    """API 配置对话框（三标签页：阅读-解析 + 阅读-翻译 + 写作）。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("API 配置")
-        self.setMinimumSize(680, 620)
+        self.setMinimumSize(680, 560)
         self.setModal(True)
         self._config = load_config()
+
+        self._processing_group = ProcessingSettingsGroup()
+        self._zotero_group = ZoteroPathGroup()
+
         self._setup_ui()
         self._load()
 
@@ -195,23 +232,24 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
 
         self.tabs = QTabWidget()
+
         self._parse_tab = APIConfigTab(
             "parse",
-            "📖 阅读-解析 API — 用于 PDF 逐页视觉解析、跨页整合、论文问答。\n需使用支持视觉的多模态模型。"
+            "📖 阅读-解析 API — PDF 逐页视觉解析、跨页整合、论文问答。\n需使用支持视觉的多模态模型。",
+            footer_widget=self._processing_group,
         )
         self._translate_tab = APIConfigTab(
             "translate",
-            "📖 阅读-翻译 API — 用于段落中英对照翻译。\n可用便宜快速的模型。"
+            "📖 阅读-翻译 API — 段落中英对照翻译。可用便宜快速的模型。",
         )
         self._write_tab = APIConfigTab(
             "write",
-            "📝 写作 API — 用于综述引文核查、综述内容优化。\n建议使用强推理模型。"
+            "📝 写作 API — 综述引文核查、综述写作辅助。建议使用强推理模型。",
+            footer_widget=self._zotero_group,
         )
-        self._processing_tab = ProcessingSettingsTab()
         self.tabs.addTab(self._parse_tab, "📖 阅读-解析")
         self.tabs.addTab(self._translate_tab, "📖 阅读-翻译")
         self.tabs.addTab(self._write_tab, "📝 写作")
-        self.tabs.addTab(self._processing_tab, "⚙️ 处理设置")
         layout.addWidget(self.tabs)
 
         btn = QHBoxLayout()
@@ -232,13 +270,15 @@ class SettingsDialog(QDialog):
         self._parse_tab.load(self._config.get("parse_api", {}))
         self._translate_tab.load(self._config.get("translate_api", {}))
         self._write_tab.load(self._config.get("write_api", {}))
-        self._processing_tab.load(self._config)
+        self._processing_group.load(self._config)
+        self._zotero_group.load(self._config)
 
     def _save(self):
         self._config["parse_api"] = self._parse_tab.get()
         self._config["translate_api"] = self._translate_tab.get()
         self._config["write_api"] = self._write_tab.get()
-        self._config.update(self._processing_tab.get())
+        self._config.update(self._processing_group.get())
+        self._config["zotero_data_dir"] = self._zotero_group.get()
         save_config(self._config)
         mode = self._config.get("stage1_mode", "async")
         conc = self._config.get("stage1_concurrency", 3)
